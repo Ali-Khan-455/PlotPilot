@@ -40,6 +40,8 @@ class FakeClient:
     """replies: str (end_turn) or (text, stop_reason) or an exception to raise."""
 
     def __init__(self, replies=(), unknown_models=(), auto_qc=False):
+        """auto_qc: False; True (auto-answer Prompts 6, 7, 9, 10, 11); or "tracker" (only 10 and 11,
+        so any unexpected QC call still fails with "ran out of scripted replies")."""
         self.replies = list(replies)
         self.auto_qc = auto_qc
         self.unknown = set(unknown_models)
@@ -49,16 +51,17 @@ class FakeClient:
         self.models = SimpleNamespace(retrieve=self._retrieve)
 
     @staticmethod
-    def _auto_qc(user):
+    def _auto_qc(user, mode=True):
         """Clean answers for Prompts 6, 7, 9 (echo), 10 (empty delta) and 11 (one scene)."""
         from plotpilot.prompts import load_prompts
         P = load_prompts()
-        if user.startswith(P["6"].text.split("[Paste")[0]):
+        qc = mode is True
+        if qc and user.startswith(P["6"].text.split("[Paste")[0]):
             return AUTO_AUDIT
-        if user.startswith(P["7"].text.split("[Paste")[0]):
+        if qc and user.startswith(P["7"].text.split("[Paste")[0]):
             return AUTO_PASS
         prefix = P["9"].text.split("[Paste narration here]")[0]
-        if user.startswith(prefix):
+        if qc and user.startswith(prefix):
             return user[len(prefix):]
         if user.startswith(P["10"].text.split("Chunk number:")[0]):
             return AUTO_DELTA
@@ -79,7 +82,7 @@ class FakeClient:
     def _stream(self, **kwargs):
         self.calls.append(kwargs)
         if not self.replies:
-            reply = self._auto_qc(kwargs["messages"][0]["content"]) if self.auto_qc else None
+            reply = self._auto_qc(kwargs["messages"][0]["content"], self.auto_qc) if self.auto_qc else None
             if reply is None:
                 raise AssertionError("FakeClient ran out of scripted replies")
         else:

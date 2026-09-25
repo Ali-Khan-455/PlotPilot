@@ -318,12 +318,12 @@ def test_unique_tracker_version_per_chunk(cwd):
 
 def test_history_is_append_only_across_chunks(cwd):
     _run_with_delta(delta())
-    p_before, t_before = q("SELECT * FROM passes"), q("SELECT * FROM tracker_versions")
+    p_before = q("SELECT * FROM passes")
     run("--accept-tracker", replies=["B"])
     run("--module", "B", replies=[BODY2])
     run("--accept-tracker")
     assert q("SELECT * FROM passes")[:len(p_before)] == p_before
-    assert q("SELECT * FROM tracker_versions")[:len(t_before)] == t_before
+    # tracker_versions prefix: covered by test_tracker_versions_prefix_unchanged (t_before is empty here)
 
 
 def test_redraft_chunk2_uses_prompt4(cwd):
@@ -335,3 +335,27 @@ def test_redraft_chunk2_uses_prompt4(cwd):
     assert "This is a continuation" in client.calls[0]["messages"][0]["content"]
     assert "This batch is romance" in client.calls[0]["system"]  # stored module reused
     assert (cwd / "scripts" / "book" / "chunk-02.txt").read_text().startswith("A fresh second chunk.")
+
+
+def test_repair_margin_with_accept_tracker_refused(cwd, capsys):
+    _run_with_delta(delta())
+    code, client = run("--repair-margin", "--accept-tracker")
+    assert code == 1 and "can't be combined" in capsys.readouterr().out
+    assert client.calls == [] and status(1) == "tracker_pending"
+
+
+def test_tracker_versions_prefix_unchanged(cwd):
+    _run_with_delta(delta())
+    run("--accept-tracker", replies=["B"])
+    t_before = q("SELECT * FROM tracker_versions")
+    assert len(t_before) == 1
+    run("--module", "B", replies=[BODY2])
+    run("--accept-tracker")
+    assert q("SELECT * FROM tracker_versions")[:1] == t_before and len(q("SELECT * FROM tracker_versions")) == 2
+
+
+def test_tracker_only_auto_mode_rejects_extra_qc_calls(cwd):
+    from tests.fakes import FakeClient
+    client = FakeClient([draft1()], auto_qc="tracker")
+    with pytest.raises(AssertionError, match="ran out"):
+        main(["--novel", "book.txt", "--module", "A"], client=client)  # P6 is not auto-answered

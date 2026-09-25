@@ -34,8 +34,9 @@ def cwd(tmp_path, monkeypatch):
     return tmp_path
 
 
-def run(*args, replies=(), auto_qc=True):
-    # Scripted replies are consumed first; auto_qc then answers Prompts 10/11 (Phase 4) cleanly.
+def run(*args, replies=(), auto_qc="tracker"):
+    # Scripted replies are consumed first; only Prompts 10/11 (Phase 4) are auto-answered, so any
+    # unexpected Prompt 6/7/8/9 call still fails with "ran out of scripted replies".
     client = FakeClient(replies, auto_qc=auto_qc)
     return main(["--novel", "book.txt", *args], client=client), client
 

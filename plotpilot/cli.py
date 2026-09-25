@@ -38,8 +38,9 @@ def main(argv=None, client=None) -> int:
     ap.add_argument("--accept-tracker", action="store_true",
                     help="Merge the reviewed tracker update for the current chunk.")
     args = ap.parse_args(argv)
-    if args.redraft and args.accept_tracker:
-        return fail("--redraft and --accept-tracker can't be combined.")
+    if args.accept_tracker and (args.redraft or args.repair_margin):
+        flag = "--redraft" if args.redraft else "--repair-margin"
+        return fail(f"{flag} and --accept-tracker can't be combined; review the result before accepting.")
     if args.accept_factcheck is not None and not args.accept_factcheck.strip():
         return fail("--accept-factcheck needs a non-empty reason.")
     path: Path = args.novel

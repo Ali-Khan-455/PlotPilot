@@ -50,3 +50,21 @@ Minor findings from each phase's final code review. They were deliberately left 
 - [ ] **Missing tests:** an edit at `drafted` staying `drafted`; the "your edit … will be fact-checked first" note; a Prompt 8 API error or STOPPED continuing to Prompt 9; the override log being written before the DB row.
 - [ ] **`db.set_status` is dead code** (`db.py`). Remove it, or use it.
 - [ ] **Audit and fact-check log files are written after the DB insert** (`qc.py`). A crash leaves `logs/<slug>/chunk-NN-*.md` one version behind, while the gate header points at it.
+
+## Phase 4 — Tracker + chunks 2–N
+
+- [ ] **Stand-in collisions within one delta go undetected** (`tracker.py`, `merge_collisions`). `Bo → "the rookie"` and `Cy → "the rookie"` in the same delta give no warning and both are merged.
+- [ ] **A stand-in change for an existing character is dropped silently** (`tracker.py`, `merge`). An operator edit such as `{"name": "aria vale", "standin": "my boss"}` is lost with no message.
+- [ ] **The mirror can stay stale after a crash** (`qc.py`, `_accept_tracker`). A crash after `add_tracker_version` commits but before `_write_mirror` leaves `trackers/<slug>.md` out of date. For the last chunk, the all-done branch never regenerates it.
+- [ ] **Missing or weak tests:**
+  - Prompt 11 malformed twice.
+  - `--accept-tracker` with the pending file missing. The behaviour is correct per the reviewer's probe; there's just no test.
+  - `--redraft` at `tracker_pending` asserts only `len(pending) == 1`, not that the old bound file was replaced.
+  - `--redraft` on a planned chunk with `--module` (the branch that drafts).
+- [ ] **The progress line shows only the previous chunk's range** (`pipeline.py`, `prompt_tracker`; `qc.py`, `_write_mirror`). The spec's "Chapters [range] processed so far" implies the cumulative range.
+- [ ] **The term `chunk` type is over-strict** (`tracker.py`, `validate_delta`). `"chunk": "2"` from the model is rejected, costing a retry or an exit 1, even though merge overwrites the value anyway.
+- [ ] **A UTF-8 BOM breaks the pending file** (`qc.py`, `_accept_tracker`). Read it with `utf-8-sig`.
+- [ ] **A stale `done`-chunk file is treated as an edit** (`pipeline.py`, `_check_done_chunks`). A file matching an earlier legitimate rendering gets the "edited after merge" warning instead of a quiet rewrite.
+- [ ] **`--module` is dropped silently** on a started chunk 1 when `--repair-margin` is also given (`pipeline.py`, `_run_chunk`). The plain path prints a note.
+- [ ] **Loose unlink at the gate** (`qc.py`, `_tracker_gate`). `old.unlink()` runs even when the regex doesn't match, so a glob-matched file with a non-numeric id is deleted. Negligible, given the slug character set.
+- [ ] **`margin_sentences` is recomputed with `count_sentences`, not taken from the model** (`qc.py`, `_accept_tracker`). The spec says "as the AI wrote it", and the two can differ with abbreviations.
