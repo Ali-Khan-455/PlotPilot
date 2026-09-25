@@ -265,3 +265,31 @@ def test_rewrite_custom_ratio():
     check_rewrite(" ".join(["word"] * 85), old)  # fine at the default ratio (Prompt 8)
     with pytest.raises(ParseError):
         check_rewrite(" ".join(["word"] * 85), old, min_ratio=config.TTS_MIN_RATIO)  # not for Prompt 9
+
+
+# --- Phase 4: continuation drafts and sentence helpers ------------------------
+
+from plotpilot.parse import count_sentences, first_sentence, parse_continuation  # noqa: E402
+
+
+def test_parse_continuation():
+    assert parse_continuation("  I kept walking. The road was long.\n") == "I kept walking. The road was long."
+    for bad in ["", "<<<MARGIN_START>>> x", "Here is the narration:\nI walked."]:
+        with pytest.raises(ParseError):
+            parse_continuation(bad)
+
+
+@pytest.mark.parametrize("text,first", [
+    ('"Run!" she said. Then more.', '"Run!" she said.'),
+    ('He said "Run." and left.', 'He said "Run." and left.'),
+    ('He said "Run!" and left. Next.', 'He said "Run!" and left.'),
+    ("One. Two.", "One."),
+    ("No terminal punctuation", "No terminal punctuation"),
+])
+def test_first_sentence(text, first):
+    assert first_sentence(text) == first
+
+
+def test_count_sentences():
+    assert count_sentences("I am Kai. I farm.") == 2
+    assert count_sentences("Just one") == 1

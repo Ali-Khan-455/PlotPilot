@@ -220,3 +220,27 @@ def check_rewrite(new: str, old: str, min_ratio: float | None = None) -> str:
         if not ends_ok or (not quoted and SIGNOFF_RE.match(last)):
             raise ParseError(f"rewrite ends with a sign-off: {last!r}")
     return t
+
+
+# --- Phase 4: continuation drafts (Prompt 4) and sentence helpers --------------
+
+# A sentence ends at . ! ? (plus an optional closing quote) only when the next non-space character
+# starts a new sentence (uppercase or an opening quote) or the text ends. So 'He said "Run." and left.'
+# stays one sentence. Known limit: abbreviations like "Mr. Smith" split after "Mr.".
+SENTENCE_END_RE = re.compile(r"[.!?][\"”’']?(?=\s+[A-Z\"“‘]|\s*$)")
+
+
+def parse_continuation(text: str) -> str:
+    """Chunk 2+ draft output: plain narration, validated like a rewrite (no delimiters,
+    preamble, fence or sign-off)."""
+    return check_rewrite(text, "")
+
+
+def first_sentence(text: str) -> str:
+    t = text.strip()
+    m = SENTENCE_END_RE.search(t)
+    return t[:m.end()] if m else t
+
+
+def count_sentences(text: str) -> int:
+    return len(SENTENCE_END_RE.findall(text.strip())) or 1

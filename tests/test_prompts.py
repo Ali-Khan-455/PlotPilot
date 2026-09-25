@@ -32,3 +32,10 @@ def test_fill_replaces_and_rejects_unknown():
 def test_pipeline_placeholders_exist():
     fill(P["3-REPAIR"].text, {REPAIR_TARGET: "t", REPAIR_MARGIN: "m"})
     fill(P["12"].text, {"[Paste the four modules]": "m", "[Paste the opening of this chunk]": "o"})
+
+
+def test_phase4_placeholders_exist():
+    fill(P["4"].text, {"[Paste your filled-in Continuity Tracker here]": "t"})
+    fill(P["10"].text, {"[paste chunk number]": "2", "[Paste Continuity Tracker]": "t",
+                        "[Paste finished narration for this chunk]": "n"})
+    fill(P["11"].text, {"[Paste finished narration for this chunk]": "n"})

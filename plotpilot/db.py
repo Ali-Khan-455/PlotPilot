@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS passes (
   id INTEGER PRIMARY KEY, novel_id INTEGER NOT NULL REFERENCES novels(id),
   chunk_id INTEGER REFERENCES chunks(id), kind TEXT NOT NULL, model TEXT, module TEXT,
   input_text TEXT NOT NULL, output_text TEXT NOT NULL, verdict TEXT, note TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tracker_versions (
+  id INTEGER PRIMARY KEY, novel_id INTEGER NOT NULL REFERENCES novels(id),
+  chunk_id INTEGER NOT NULL UNIQUE REFERENCES chunks(id), json TEXT NOT NULL, delta TEXT NOT NULL,
+  accepted_at TEXT NOT NULL);
 """
 
 
@@ -101,3 +105,33 @@ def latest_pass(conn, chunk_id, kind, after_id=None):
         " AND verdict IS NULL AND id > ? ORDER BY id DESC LIMIT 1",
         (chunk_id, kind, after_id or 0),
     ).fetchone()
+
+
+def chunks(conn, novel_id):
+    return conn.execute(
+        "SELECT id, idx, label, status, source_text FROM chunks WHERE novel_id = ? ORDER BY idx", (novel_id,)
+    ).fetchall()
+
+
+def chunk(conn, chunk_id):
+    return conn.execute(
+        "SELECT id, idx, label, status, source_text FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+
+
+def add_tracker_version(conn, novel_id, chunk_id, tracker_json, delta_json, new_status="done") -> int:
+    """Insert the accepted tracker version and set the chunk's status in ONE transaction.
+    UNIQUE(chunk_id) makes a second accept for the same chunk impossible."""
+    with conn:
+        vid = conn.execute(
+            "INSERT INTO tracker_versions (novel_id, chunk_id, json, delta, accepted_at) VALUES (?, ?, ?, ?, ?)",
+            (novel_id, chunk_id, tracker_json, delta_json, _now()),
+        ).lastrowid
+        conn.execute("UPDATE chunks SET status = ? WHERE id = ?", (new_status, chunk_id))
+        return vid
+
+
+def latest_tracker(conn, novel_id):
+    """The newest accepted tracker JSON string, or None."""
+    row = conn.execute("SELECT json FROM tracker_versions WHERE novel_id = ? ORDER BY id DESC LIMIT 1",
+                       (novel_id,)).fetchone()
+    return row["json"] if row else None
