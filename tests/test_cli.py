@@ -64,10 +64,19 @@ def test_no_headings(cwd, capsys):
     assert "No chapter headings found" in capsys.readouterr().out
 
 
-def test_all_folded(cwd, capsys):
-    write_novel(cwd / "n.txt", n=3, body="short")
-    assert main(["--novel", "n.txt"]) == 1
-    assert "look like a table of contents" in capsys.readouterr().out
+def test_warnings_are_printed(cwd, capsys):
+    long_body = " ".join(["w"] * 13_000)
+    text = ("Front matter words\n*** START OF THE PROJECT GUTENBERG EBOOK X ***\n\n"
+            "Chapter 1\n\nshort\n\nChapter 3\n\n" + BODY + "\n\nChapter 2\n\n" + long_body
+            + "\n*** END OF THE PROJECT GUTENBERG EBOOK X ***\nlicence\n")
+    (cwd / "n.txt").write_text(text)
+    assert main(["--novel", "n.txt"]) == 0
+    out = capsys.readouterr().out
+    assert "dropped 12 words of front matter" in out
+    assert "dropped 10 words of trailing matter" in out
+    assert "chapter(s) 1 have fewer than 50 words" in out
+    assert "goes backwards or repeats at line" in out
+    assert "is 13,000 words with no scene break" in out
 
 
 def test_empty_slug(cwd, capsys):

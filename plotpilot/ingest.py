@@ -40,11 +40,11 @@ NUM_WORDS = {
 _NW = "|".join(sorted(NUM_WORDS, key=len, reverse=True))
 CHAPTER_RE = re.compile(
     r"^[ \t]*(?:chapter|ch\.)[ \t]*"
-    rf"(?P<num>\d+|[ivxlcdm]+(?=[ \t]*(?:$|[:.\-—]))|(?:{_NW})(?:[- ](?:{_NW}))?)"
+    rf"(?P<num>\d+|[ivxlcdm]+(?=[ \t]*(?:$|[:.,\-–—]))|(?:{_NW})(?:[- ](?:{_NW}))?)"
     r"\b[^\n]{0,80}$",
     re.I,
 )
-SIDE_RE = re.compile(r"^[ \t]*(?P<kw>prologue|epilogue)(?:[ \t]*[:.\-—][^\n]{0,80})?[ \t]*$", re.I)
+SIDE_RE = re.compile(r"^[ \t]*(?P<kw>prologue|epilogue)(?:[ \t]*[:.,\-–—][^\n]{0,80})?[ \t]*$", re.I)
 GUT_START_RE = re.compile(r"^\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG", re.I)
 GUT_END_RE = re.compile(r"^\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG", re.I)
 ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
@@ -66,7 +66,6 @@ class Parsed:
     trailing_words: int = 0
     short_chapters: list[int] = field(default_factory=list)
     sequence_warnings: list[str] = field(default_factory=list)
-    all_folded: int = 0  # headings found but every chapter folded as contents
 
 
 def is_heading_line(line: str) -> bool:
@@ -98,6 +97,12 @@ def heading_number(heading: str) -> int | None:
     return words_to_int(num)
 
 
+def heading_key(heading: str):
+    """What a contents entry and its real heading share: the chapter number or the keyword."""
+    side = SIDE_RE.match(heading)
+    return side["kw"].lower() if side else heading_number(heading)
+
+
 def _looks_like_contents(ch: Chapter) -> bool:
     if ch.words < config.MIN_CHAPTER_WORDS:
         return True
@@ -124,18 +129,16 @@ def parse_novel(text: str) -> Parsed:
         body = "\n".join(lines[i + 1:nxt]).strip()
         raw.append(Chapter(0, lines[i].strip(), i + 1, body, count_words(body)))
 
-    # Fold the leading run of table-of-contents entries into front matter.
+    # Fold the leading run of table-of-contents entries into front matter. An entry must
+    # look like contents AND be repeated by a later real heading, so a short real chapter
+    # is never dropped. The last chapter has no later heading, so something is always kept.
     k = 0
     while k < len(raw) and _looks_like_contents(raw[k]):
-        side = SIDE_RE.match(raw[k].heading)
-        if side and not any(
-            h.heading.lower().startswith(side["kw"].lower()) for h in raw[k + 1:]
-        ):
-            break  # a real (short) prologue/epilogue, not a contents entry
+        key = heading_key(raw[k].heading)
+        if not any(heading_key(h.heading) == key for h in raw[k + 1:]):
+            break
         front_words += count_words(raw[k].heading) + raw[k].words
         k += 1
-    if k == len(raw):
-        return Parsed([], front_words, trailing_words, all_folded=len(raw))
 
     chapters = [replace(c, idx=n) for n, c in enumerate(raw[k:], 1)]
     short = [c.idx for c in chapters if c.words < config.MIN_CHAPTER_WORDS]
@@ -145,9 +148,9 @@ def parse_novel(text: str) -> Parsed:
         n = heading_number(c.heading)
         if n is None:
             continue
-        if prev and n < prev[0]:
+        if prev and n <= prev[0]:
             warnings.append(
-                f"WARNING: chapter sequence goes backwards at line {c.line_no} "
+                f"WARNING: chapter sequence goes backwards or repeats at line {c.line_no} "
                 f"('{c.heading}' after '{prev[1]}'); possible false-positive heading."
             )
         prev = (n, c.heading)

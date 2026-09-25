@@ -35,9 +35,6 @@ def main(argv=None) -> int:
 
     parsed = parse_novel(text)
     if not parsed.chapters:
-        if parsed.all_folded:
-            return fail(f"All {parsed.all_folded} detected chapters look like a table of contents "
-                        f"(under {config.MIN_CHAPTER_WORDS} words, or mostly heading lines).")
         return fail("No chapter headings found (expected 'Chapter N', 'Chapter IV', 'Chapter One', "
                     "'Prologue', 'Epilogue' on their own line after a blank line).")
 

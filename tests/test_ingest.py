@@ -66,10 +66,10 @@ def test_front_matter_counted():
 
 
 def test_blank_separated_contents_folds():
-    toc = "\n\n".join(f"CHAPTER {i}. Name{i}." for i in range(1, 4))
+    toc = "\n\n".join(f"CHAPTER {i}. Name{i}." for i in range(1, 3))
     p = parse_novel("CONTENTS\n\n" + toc + "\n\n" + novel("CHAPTER 1. Name1.", "CHAPTER 2. Name2."))
     assert [c.heading for c in p.chapters] == ["CHAPTER 1. Name1.", "CHAPTER 2. Name2."]
-    assert p.front_words == 1 + 3 * 3  # "CONTENTS" + three 3-word headings
+    assert p.front_words == 1 + 2 * 3  # "CONTENTS" + two 3-word headings
 
 
 def test_single_spaced_contents_folds():
@@ -78,14 +78,14 @@ def test_single_spaced_contents_folds():
     assert headings(text) == ["CHAPTER 1. Real.", "CHAPTER 2. Real."]
 
 
-def test_all_folded_is_reported():
+def test_all_short_chapters_are_kept():
     p = parse_novel(novel("Chapter 1", "Chapter 2", body="too short"))
-    assert p.chapters == [] and p.all_folded == 2
+    assert [c.heading for c in p.chapters] == ["Chapter 1", "Chapter 2"]
+    assert p.short_chapters == [1, 2]
 
 
 def test_no_headings():
-    p = parse_novel("just some text\n\nmore text\n")
-    assert p.chapters == [] and p.all_folded == 0
+    assert parse_novel("just some text\n\nmore text\n").chapters == []
 
 
 def test_short_real_prologue_is_kept():
@@ -203,3 +203,24 @@ def test_word_conservation():
 
 def test_estimate_tokens():
     assert estimate_tokens(1000) == 1350
+
+
+# --- final-review fixes --------------------------------------------------------
+
+def test_short_real_first_chapter_is_kept():
+    text = "Chapter 1\n\nIt was a dark night.\n\n" + novel("Chapter 2", "Chapter 3")
+    p = parse_novel(text)
+    assert [c.heading for c in p.chapters] == ["Chapter 1", "Chapter 2", "Chapter 3"]
+    assert p.short_chapters == [1]
+
+
+def test_contents_then_foreword_warns_on_repeated_number():
+    toc = "\n".join(f"Chapter {i}" for i in range(1, 21))
+    foreword = "\n".join(["FOREWORD"] + [" ".join(["f"] * 10)] * 40)
+    p = parse_novel(toc + "\n" + foreword + "\n\n" + novel("Chapter 1", "Chapter 2"))
+    assert any("'Chapter 1' after 'Chapter 1'" in w for w in p.sequence_warnings)
+
+
+def test_en_dash_and_comma_after_numeral():
+    hs = ["CHAPTER IV – The Fall", "Chapter V, In Which Things Happen", "Prologue – Dawn"]
+    assert headings(novel(*hs)) == hs
