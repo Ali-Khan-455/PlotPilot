@@ -62,6 +62,7 @@ Spec edits applied for D4–D8: Prompts 10 and 11 were added, and the wording in
 | R15 | Where `factcheck_overridden` lives (D16) | Stored on the chunk's `factcheck` pass (`verdict = 'OVERRIDDEN'`, reason in `note`). Shown in the tracker's markdown mirror (`trackers/<slug>.md`) under "Fact-check overrides". It is **not** included in the tracker text sent to LLM prompts, because it is operator metadata, not story continuity. The operator is `getpass.getuser()`. | Also send it to prompts if wanted. |
 | R16 | Gap D heading regex | The given regex `^## PROMPT (\d+) — ` misses `## PROMPT 3-REPAIR —` and the `### MODULE A —` headings. The regex used is `^## PROMPT (\d+(?:-[A-Z]+)?) — ` for prompts and `^### MODULE ([A-Z]) — ` for modules. The section runs from its heading to the next `##`/`###` heading. Inside it, the prompt text is between the `**COPY EVERYTHING BELOW…**` line and the `**END OF …**` line. | Regex only. |
 | R17 | Target sentence "in the tracker" (D19) | Stored in the tracker JSON's chunk-1 margin fields (margin, margin length, target sentence), matching the spec's tracker template. | None. |
+| R18 | Phase 1 ingest rules | **Packing:** D8's "a chunk over 12k splits at the nearest scene break" can only happen for a single long chapter. Greedy packing (≤5 chapters, ≤12k words) never builds a multi-chapter chunk over 12k, because it flushes at the chapter boundary first. A chapter over 12k words is split at scene breaks into parts of ≤12k, labelled `Ch N (part k/n)`, with the heading in part 1 only. **Word counts:** a single `count_words` rule applies everywhere. Scene-break lines and headings are not counted, so the sum of chunk words equals the sum of chapter words. **Contents fold:** the leading run of chapters under 50 words, or with ≥50% heading-shaped lines, is folded into front matter. A Prologue/Epilogue folds only if a later heading repeats its keyword. **Gutenberg frame:** text up to `*** START OF … PROJECT GUTENBERG` and from `*** END OF …` onward is dropped. Every drop is counted and warned about. | Parser only. |
 | R14 | Tests never hit the API | The LLM client is injected. Tests use a fake that returns canned outputs. | None. |
 
 ## 3. Architecture
@@ -93,10 +94,12 @@ Prompts are located by heading (D21, R16), never by line number. Each prompt is 
 ### 3.3 Data model (SQLite, append-only history)
 
 - `novels(id, slug, title, source_path, source_sha256, created_at)`
-- `chunks(id, novel_id, idx, chapter_start, chapter_end, word_count, source_text, status)`
+- `chunks(id, novel_id, idx, label, chapter_start, chapter_end, word_count, source_text, status)`. `label` is the display range, e.g. `Ch 1–5` or `Ch 7 (part 2/3)`.
 - `passes(id, novel_id, chunk_id NULL, kind, model, module NULL, input_text, output_text, verdict NULL, note NULL, created_at)`
   `kind` ∈ `classify, draft, margin_repair, audit, factcheck, operator_edit, texture, tts, tracker_delta, scenes, hook`
 - `tracker_versions(id, novel_id, json, accepted_at)`
+
+Tables are created with `CREATE TABLE IF NOT EXISTS`, which only adds tables. Phase 2+ cannot alter existing `novels` or `chunks` columns without a migration step.
 
 Nothing is updated in place except `chunks.status`. This preserves the fair-use record: every draft and every pass is kept.
 
@@ -134,7 +137,18 @@ One `python plotpilot.py …` invocation advances the first unfinished chunk as 
 
 ## 4. Risks and open items
 
-1. **Chapter detection on messy `.txt`.** The default heading regex is `Chapter N` / `CHAPTER N` / `Ch. N` on its own line. If no chapter is found, fail with a clear message. A `--chapter-regex` flag is deferred until a real novel needs it.
+1. **Chapter detection on messy `.txt`.** A heading is a line that is either the first line or follows a blank line, **and** is one of:
+   - `Chapter`/`Ch.` followed by a numeral, a roman numeral (which must end the line or be followed by `: . - —`), or a number word such as `Twenty-One`, with the rest of the line ≤80 chars;
+   - `Prologue`/`Epilogue`, optionally followed by punctuation and a title.
+
+   If no chapter is found, the run fails with a clear message. A chapter sequence that goes backwards triggers a warning, not a failure. A `--chapter-regex` flag is deferred until a real novel needs it.
+
+   Known limits, none fixed in Phase 1:
+   - A roman-numeral heading whose title follows with no punctuation (`CHAPTER IV THE FALL`) is not detected. That chapter merges into the one before it.
+   - Bare-number headings (`1.`, `1`) are not detected.
+   - `Ch 5` without a period is not detected.
+   - `Book One` / `Part One` are deliberately treated as body text, since Part handling is deferred (D1). Books that restart at `Chapter 1` produce a harmless sequence warning at each restart.
+   - A heading directly after a scene-break line, with no blank line between them, is not detected.
 2. **Scene-break detection.** Lines of three or more `*`, `#`, `~`, `-`, or `=` characters (spaces allowed). If a chunk over 12k words has no scene break, it stays one oversize chunk and a warning is logged.
 3. **Prompt 5 context size.** D1 makes the whole novel one Part, so Prompt 5's input is the whole script. Handled by D17: stop with a clear error. Phase 1 also warns early, using a deterministic estimate (source words × 1.35 tokens per word, as an upper bound on narration size, against the configured generation model's context size). Real Part detection (D1's later version) fixes it properly.
 4. **Haiku fact-check strictness** on ~12k-word chunks may over-flag paraphrases. Handled by D16 (logged, reasoned override).
