@@ -33,7 +33,11 @@ def main(argv=None, client=None) -> int:
     ap.add_argument("--repair-margin", action="store_true", help="Force Prompt 3-REPAIR on chunk 1's margin.")
     ap.add_argument("--gen-model", default=config.GEN_MODEL, help="Model for drafts and repairs.")
     ap.add_argument("--qc-model", default=config.QC_MODEL, help="Model for classification and QC passes.")
+    ap.add_argument("--accept-factcheck", metavar="REASON",
+                    help="Accept a failed fact-check for the current chunk; the reason is logged.")
     args = ap.parse_args(argv)
+    if args.accept_factcheck is not None and not args.accept_factcheck.strip():
+        return fail("--accept-factcheck needs a non-empty reason.")
     path: Path = args.novel
 
     if not path.is_file():
@@ -66,7 +70,8 @@ def main(argv=None, client=None) -> int:
         try:
             return run_chunk1(conn, llm, load_prompts(), novel_id, slug, module=args.module,
                               redraft=args.redraft, repair=args.repair_margin, gen_model=args.gen_model,
-                              qc_model=args.qc_model, out_dir=args.out)
+                              qc_model=args.qc_model, out_dir=args.out,
+                              accept=args.accept_factcheck.strip() if args.accept_factcheck else None)
         except (LLMError, anthropic.AnthropicError) as e:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}")

@@ -1,5 +1,7 @@
-"""Stage 2: chunk 1 module gate, draft, margin check and repair (Phase 2)."""
+"""Stage 2 for chunk 1 (module gate, draft, margin check/repair) plus the narration state and
+file sync that QC (stage 4, qc.py) builds on."""
 
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import anthropic
@@ -13,15 +15,73 @@ REPAIR_TARGET = ("[paste the target sentence — the one immediately following t
                  "already logged in the Continuity Tracker]")
 REPAIR_MARGIN = "[paste the flawed margin here]"
 FORCED = "forced by operator"
+TEXT_KINDS = ("draft", "margin_repair", "operator_edit", "texture", "tts")
 
 
-def current_margin(conn, chunk_id):
-    """(margin, target, body) re-derived from stored raw outputs. Only a repair newer than the
-    latest ok draft counts, so a repair from an abandoned draft never pairs with a newer one."""
-    d = db.latest_pass(conn, chunk_id, "draft")
-    draft = parse_draft(d["output_text"])
-    r = db.latest_pass(conn, chunk_id, "margin_repair", after_id=d["id"])
-    return (parse_repair(r["output_text"]) if r else draft.margin), draft.target, draft.body
+class FileFormatError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class State:
+    margin: str
+    target: str
+    body: str
+
+
+def render(margin: str, body: str) -> str:
+    """Chunk file text: the margin as its own first paragraph, then the body."""
+    return f"{' '.join(margin.split())}\n\n{body.strip()}\n"
+
+
+def norm_ws(text: str) -> str:
+    return "\n".join(line.rstrip() for line in text.strip().split("\n"))
+
+
+def split_file(text: str) -> tuple[str, str]:
+    parts = text.strip().split("\n\n", 1)
+    if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+        raise FileFormatError("ERROR: keep the margin as its own first paragraph (blank line after it).")
+    return " ".join(parts[0].split()), parts[1].strip()
+
+
+def _apply(state, kind, output):
+    if kind == "draft":
+        d = parse_draft(output)
+        return State(d.margin, d.target, d.body)
+    if state is None:
+        return None
+    if kind == "margin_repair":
+        return replace(state, margin=parse_repair(output))
+    if kind == "operator_edit":
+        margin, body = split_file(output)
+        return replace(state, margin=margin, body=body)
+    return replace(state, body=output.strip())  # texture, tts
+
+
+def narration_state(conn, chunk_id):
+    """Fold the ok text-changing passes from the latest ok draft onward; None without an ok draft."""
+    rows = db.ok_passes(conn, chunk_id, TEXT_KINDS)
+    drafts = [i for i, r in enumerate(rows) if r["kind"] == "draft"]
+    if not drafts:
+        return None
+    state = None
+    for r in rows[drafts[-1]:]:
+        state = _apply(state, r["kind"], r["output_text"])
+    return state
+
+
+def stale_renderings(conn, chunk_id) -> set[str]:
+    """Every rendering the chunk file has ever legitimately held, across all draft series,
+    including Phase 2's single-space form (margin + " " + body)."""
+    seen, state = set(), None
+    for r in db.ok_passes(conn, chunk_id, TEXT_KINDS):
+        state = _apply(state, r["kind"], r["output_text"])
+        if state:
+            seen.add(norm_ws(render(state.margin, state.body)))
+            if r["kind"] in ("draft", "margin_repair"):
+                seen.add(norm_ws(f"{state.margin} {state.body}"))
+    return seen
 
 
 class Chunk1:
@@ -30,9 +90,16 @@ class Chunk1:
         self.novel_id, self.slug = novel_id, slug
         self.gen_model, self.qc_model, self.out_dir = gen_model, qc_model, out_dir
         self.chunk = db.first_chunk(conn, novel_id)
+        self.path = Path(out_dir) / slug / f"chunk-{self.chunk['idx']:02d}.txt"
 
-    def _attempt(self, kind, model, user, parse, *, system=None, max_tokens, module=None, note=None):
-        """Call, parse in memory, insert the pass once with its verdict. Retry once on ParseError."""
+    @property
+    def status(self) -> str:
+        return db.first_chunk(self.conn, self.novel_id)["status"]
+
+    def attempt(self, kind, model, user, parse, *, system=None, max_tokens, module=None, note=None,
+                status_for=None):
+        """Call, parse in memory, insert the pass once with its verdict (and, atomically, the
+        status from status_for(parsed)). Retry once on ParseError."""
         input_text = f"{system}\n\n=====\n\n{user}" if system is not None else user
         last = None
         for _ in range(2):
@@ -52,7 +119,7 @@ class Chunk1:
                 last = e
                 continue
             db.add_pass(self.conn, self.novel_id, self.chunk["id"], kind, model, input_text, text,
-                        module=module, note=note)
+                        module=module, note=note, new_status=status_for(parsed) if status_for else None)
             return parsed
         raise ParseError(f"malformed twice ({last})")
 
@@ -68,8 +135,8 @@ class Chunk1:
             user = fill(self.P["12"].text, {"[Paste the four modules]": modules,
                                             "[Paste the opening of this chunk]": opening})
             try:
-                letter = self._attempt("classify", self.qc_model, user, parse_module,
-                                       max_tokens=config.CLASSIFY_MAX_TOKENS)
+                letter = self.attempt("classify", self.qc_model, user, parse_module,
+                                      max_tokens=config.CLASSIFY_MAX_TOKENS)
             except ParseError as e:
                 print(f"Module classification for chunk 1 was {e}; raw outputs are stored. "
                       "Re-run, or pass --module.")
@@ -83,16 +150,17 @@ class Chunk1:
         self.llm.check_models([self.gen_model])
         system = f"{self.P['1'].text}\n\n{self.P[f'MODULE {module}'].text}"
         user = f"{self.P['3'].text}\n\n---\n\n{self.chunk['source_text']}"
-        return self._attempt("draft", self.gen_model, user, parse_draft, system=system,
-                             max_tokens=config.GEN_MAX_TOKENS, module=module, note=note)
+        return self.attempt("draft", self.gen_model, user, parse_draft, system=system,
+                            max_tokens=config.GEN_MAX_TOKENS, module=module, note=note,
+                            status_for=lambda _: "drafted")
 
     def repair(self, margin, target, reason):
         """Run Prompt 3-REPAIR. A failed repair keeps the current margin and warns."""
         self.llm.check_models([self.gen_model])
         user = fill(self.P["3-REPAIR"].text, {REPAIR_TARGET: target, REPAIR_MARGIN: margin})
         try:
-            new = self._attempt("margin_repair", self.gen_model, user, parse_repair,
-                                max_tokens=config.REPAIR_MAX_TOKENS, note=reason)
+            new = self.attempt("margin_repair", self.gen_model, user, parse_repair,
+                               max_tokens=config.REPAIR_MAX_TOKENS, note=reason)
         except (ParseError, LLMError, anthropic.AnthropicError) as e:
             if not isinstance(e, ParseError):
                 log_error(self.llm.log_dir, f"margin_repair {type(e).__name__}: {e}")
@@ -103,45 +171,71 @@ class Chunk1:
         if still:
             print(f"WARNING: repaired margin still flagged ({still}); use --repair-margin to try again.")
 
-    def write(self) -> Path:
-        margin, _, body = current_margin(self.conn, self.chunk["id"])
-        folder = Path(self.out_dir) / self.slug
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / "chunk-01.txt"
-        path.write_text(f"{margin} {body}\n", encoding="utf-8")
-        return path
+    def write(self):
+        state = narration_state(self.conn, self.chunk["id"])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(render(state.margin, state.body), encoding="utf-8")
 
-    def done(self, path):
-        db.set_status(self.conn, self.chunk["id"], "drafted")
-        print(f"Chunk 1 drafted → {path}. QC is not built yet (Phase 3).")
+    def sync_file(self):
+        """Reconcile chunk-01.txt with the stored state. Returns 'edit', 'stale', 'missing' or None."""
+        state = narration_state(self.conn, self.chunk["id"])
+        if state is None:
+            return None
+        if not self.path.exists():
+            self.write()
+            return "missing"
+        raw = self.path.read_text(encoding="utf-8")
+        have = norm_ws(raw)
+        if have == norm_ws(render(state.margin, state.body)):
+            return None
+        if have in stale_renderings(self.conn, self.chunk["id"]):
+            self.write()
+            print(f"Note: {self.path.name} matched an earlier stored version and was rewritten from the "
+                  "current state. To restore earlier text on purpose, edit it (any change beyond "
+                  "whitespace counts as an edit).")
+            return "stale"
+        split_file(raw)  # raises FileFormatError
+        new_status = "drafted" if self.status == "drafted" else "audited"
+        db.add_pass(self.conn, self.novel_id, self.chunk["id"], "operator_edit", None, "", raw,
+                    new_status=new_status)
+        self.write()  # canonical form, so an unchanged file never re-triggers
+        print(f"Recorded your edit to {self.path.name}; it will be fact-checked.")
+        return "edit"
 
 
 def run_chunk1(conn, llm, prompts, novel_id, slug, *, module, redraft, repair,
-               gen_model, qc_model, out_dir) -> int:
-    c = Chunk1(conn, llm, prompts, novel_id, slug, gen_model=gen_model, qc_model=qc_model, out_dir=out_dir)
-    drafted = c.chunk["status"] == "drafted"
+               gen_model, qc_model, out_dir, accept=None) -> int:
+    from plotpilot import qc
 
-    if drafted and not redraft and not repair:
+    c = Chunk1(conn, llm, prompts, novel_id, slug, gen_model=gen_model, qc_model=qc_model, out_dir=out_dir)
+    started = c.status != "planned"
+    edited = False
+    if started:
+        try:
+            edited = c.sync_file() == "edit"
+        except FileFormatError as e:
+            print(e)
+            return 1
+
+    if started and not redraft and not repair:
         if module:
             print("Note: --module is ignored; chunk 1 is already drafted (use --redraft to redo it).")
-        margin, _, _ = current_margin(conn, c.chunk["id"])
-        print(f'Chunk 1 is drafted (margin: "{margin}"). QC is not built yet (Phase 3).')
-        return 0
+        return qc.run(c, accept=accept, edited=edited)
 
-    if drafted and repair and not redraft:
-        margin, target, _ = current_margin(conn, c.chunk["id"])
-        c.repair(margin, target, FORCED)
-        c.done(c.write())
-        return 0
+    if started and repair and not redraft:
+        state = narration_state(conn, c.chunk["id"])
+        c.repair(state.margin, state.target, FORCED)
+        c.write()
+        return qc.run(c, accept=accept, edited=edited)
 
-    if redraft and drafted and not module:
+    if redraft and started and not module:
         last = db.latest_pass(conn, c.chunk["id"], "draft")
         module = last["module"] if last else None
     if not module:
         return c.gate()
 
     try:
-        d = c.draft(module, note="--redraft requested" if drafted else None)
+        d = c.draft(module, note="--redraft requested" if started else None)
     except ParseError as e:
         print(f"Chunk 1 draft output was {e}; raw outputs are stored. Re-run to try again.")
         return 1
@@ -153,5 +247,6 @@ def run_chunk1(conn, llm, prompts, novel_id, slug, *, module, redraft, repair,
         c.repair(d.margin, d.target, reason)
     else:
         print("Margin check: clean.")
-    c.done(c.write())
-    return 0
+    c.write()
+    print(f"Chunk 1 drafted → {c.path}.")
+    return qc.run(c, accept=accept, edited=False)

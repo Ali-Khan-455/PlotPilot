@@ -33,13 +33,28 @@ class _Stream:
 class FakeClient:
     """replies: str (end_turn) or (text, stop_reason) or an exception to raise."""
 
-    def __init__(self, replies=(), unknown_models=()):
+    def __init__(self, replies=(), unknown_models=(), auto_qc=False):
         self.replies = list(replies)
+        self.auto_qc = auto_qc
         self.unknown = set(unknown_models)
         self.calls = []       # kwargs of each messages.stream call
         self.retrieved = []   # model ids passed to models.retrieve
         self.messages = SimpleNamespace(stream=self._stream)
         self.models = SimpleNamespace(retrieve=self._retrieve)
+
+    @staticmethod
+    def _auto_qc(user):
+        """Clean answers for Prompts 6, 7 and 9 (echoing the narration for 9)."""
+        from plotpilot.prompts import load_prompts
+        P = load_prompts()
+        if user.startswith(P["6"].text.split("[Paste")[0]):
+            return "5. **Texture gaps**\n- None\n\n6. **TTS hazards**\n- None"
+        if user.startswith(P["7"].text.split("[Paste")[0]):
+            return "Step 4: verdict PASS"
+        prefix = P["9"].text.split("[Paste narration here]")[0]
+        if user.startswith(prefix):
+            return user[len(prefix):]
+        return None
 
     def _retrieve(self, model_id):
         self.retrieved.append(model_id)
@@ -50,8 +65,11 @@ class FakeClient:
     def _stream(self, **kwargs):
         self.calls.append(kwargs)
         if not self.replies:
-            raise AssertionError("FakeClient ran out of scripted replies")
-        reply = self.replies.pop(0)
+            reply = self._auto_qc(kwargs["messages"][0]["content"]) if self.auto_qc else None
+            if reply is None:
+                raise AssertionError("FakeClient ran out of scripted replies")
+        else:
+            reply = self.replies.pop(0)
         if isinstance(reply, BaseException):
             raise reply
         text, stop = (reply, "end_turn") if isinstance(reply, str) else reply

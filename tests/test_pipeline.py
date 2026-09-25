@@ -30,16 +30,19 @@ def cwd(tmp_path, monkeypatch):
 
 
 def run(*args, replies=(), client=None):
-    client = client or FakeClient(replies)
+    # Drafting runs continue into QC (Phase 3); auto_qc answers Prompts 6, 7 and 9 cleanly.
+    client = client or FakeClient(replies, auto_qc=True)
     code = main(["--novel", "book.txt", *args], client=client)
     return code, client
 
 
-def passes():
+def passes(kinds=("classify", "draft", "margin_repair")):
+    """Stage-2 passes only (QC passes are covered in test_qc.py)."""
+    marks = ",".join("?" * len(kinds))
     with sqlite3.connect(config.DB_PATH) as conn:
         return conn.execute(
-            "SELECT kind, model, module, verdict, note, input_text, output_text FROM passes ORDER BY id"
-        ).fetchall()
+            "SELECT kind, model, module, verdict, note, input_text, output_text FROM passes"
+            f" WHERE kind IN ({marks}) ORDER BY id", kinds).fetchall()
 
 
 def status():
@@ -78,12 +81,12 @@ def test_gate_malformed_twice_fails(cwd):
 
 def test_draft_writes_clean_narration(cwd):
     code, client = run("--module", "B", replies=[draft()])
-    assert code == 0 and status() == "drafted"
-    assert client.retrieved == [config.GEN_MODEL]
+    assert code == 0 and status() == "normalized"
+    assert client.retrieved == [config.GEN_MODEL, config.QC_MODEL]  # the draft checks only gen_model
     text = chunk_file(cwd)
     assert "<<<" not in text and "margin is" not in text
     assert text.count(MARGIN) == 1 and text.count(TARGET) == 1
-    assert text.startswith(MARGIN + " " + TARGET)
+    assert text.startswith(MARGIN + "\n\n" + TARGET)
     kind, model, module, verdict, note, input_text, _ = passes()[0]
     assert (kind, model, module, verdict) == ("draft", config.GEN_MODEL, "B", None)
     assert "Universal" not in input_text  # the heading is not part of the prompt text
@@ -93,10 +96,10 @@ def test_draft_writes_clean_narration(cwd):
 
 
 def test_classify_then_draft_retrieves_each_model_once(cwd):
-    client = FakeClient(["B", draft()])
+    client = FakeClient(["B", draft()], auto_qc=True)
     main(["--novel", "book.txt"], client=client)
     main(["--novel", "book.txt", "--module", "B"], client=client)
-    assert client.retrieved == [config.QC_MODEL, config.GEN_MODEL]
+    assert client.retrieved[:2] == [config.QC_MODEL, config.GEN_MODEL]
 
 
 def test_hooky_margin_triggers_repair(cwd, capsys):
@@ -104,14 +107,14 @@ def test_hooky_margin_triggers_repair(cwd, capsys):
     assert code == 0
     out = capsys.readouterr().out
     assert "Margin check fired: question mark" in out
-    assert chunk_file(cwd).startswith("I am a boy. " + TARGET)
+    assert chunk_file(cwd).startswith("I am a boy.\n\n" + TARGET)
     assert passes()[1][0] == "margin_repair" and passes()[1][4] == "question mark"
     assert client.calls[1]["max_tokens"] == config.REPAIR_MAX_TOKENS
 
 
 def test_malformed_then_good_draft(cwd):
     code, _ = run("--module", "A", replies=["no markers here", draft()])
-    assert code == 0 and status() == "drafted"
+    assert code == 0 and status() == "normalized"
     assert [p[3] for p in passes()] == ["PARSE_FAILED", None]
 
 
@@ -139,21 +142,21 @@ def test_crash_then_redraft_ignores_stale_repair(cwd):
     with sqlite3.connect(config.DB_PATH) as conn:  # simulate a crash before the status update
         conn.execute("UPDATE chunks SET status = 'planned'")
     code, _ = run("--module", "A", replies=[draft(margin="Fresh plain margin.")])
-    assert code == 0 and chunk_file(cwd).startswith("Fresh plain margin. ")
+    assert code == 0 and chunk_file(cwd).startswith("Fresh plain margin.\n\n")
 
 
 def test_forced_repair_with_module(cwd):
     code, client = run("--module", "A", "--repair-margin", replies=[draft(), repair("Forced margin.")])
-    assert code == 0 and len(client.calls) == 2
+    assert code == 0 and [c["model"] for c in client.calls[:2]] == [config.GEN_MODEL] * 2
     assert passes()[1][4] == "forced by operator"
-    assert chunk_file(cwd).startswith("Forced margin. ")
+    assert chunk_file(cwd).startswith("Forced margin.\n\n")
 
 
 def test_repair_failure_keeps_draft_margin(cwd, capsys):
     code, _ = run("--module", "A", replies=[draft(margin="Who am I?"), "junk", "junk"])
-    assert code == 0 and status() == "drafted"
+    assert code == 0 and status() == "normalized"
     assert "margin repair failed" in capsys.readouterr().out
-    assert chunk_file(cwd).startswith("Who am I? ")
+    assert chunk_file(cwd).startswith("Who am I?\n\n")
 
 
 def test_stopped_repair_is_ignored_on_rerun(cwd, capsys):
@@ -161,7 +164,7 @@ def test_stopped_repair_is_ignored_on_rerun(cwd, capsys):
     capsys.readouterr()
     code, client = run(replies=[])
     assert code == 0 and client.calls == []
-    assert 'margin: "Who am I?"' in capsys.readouterr().out
+    assert chunk_file(cwd).startswith("Who am I?\n\n")
 
 
 # --- drafted chunk ------------------------------------------------------------
@@ -173,25 +176,25 @@ def test_rerun_on_drafted_chunk_makes_no_calls(cwd, capsys):
     code, client = run("--module", "B", replies=[])
     assert code == 0 and client.calls == [] and client.retrieved == []
     out = capsys.readouterr().out
-    assert "--module is ignored" in out and "QC is not built yet" in out
+    assert "--module is ignored" in out and "QC complete" in out
     assert passes() == snapshot  # history is never rewritten
 
 
 def test_repair_margin_on_drafted_chunk(cwd):
     run("--module", "A", replies=[draft()])
     code, client = run("--repair-margin", replies=[repair("Operator margin.")])
-    assert code == 0 and len(client.calls) == 1 and status() == "drafted"
+    assert code == 0 and len(client.calls) == 1 and status() == "normalized"
     assert passes()[-1][0] == "margin_repair" and passes()[-1][4] == "forced by operator"
-    assert chunk_file(cwd).startswith("Operator margin. ")
+    assert chunk_file(cwd).startswith("Operator margin.\n\n")
 
 
 def test_redraft_with_new_module(cwd):
     run("--module", "A", replies=[draft()])
     code, _ = run("--redraft", "--module", "C", replies=[draft(margin="Second margin.")])
-    assert code == 0 and status() == "drafted"
+    assert code == 0 and status() == "normalized"
     kind, _, module, _, note, _, _ = passes()[-1]
     assert (kind, module, note) == ("draft", "C", "--redraft requested")
-    assert chunk_file(cwd).startswith("Second margin. ")
+    assert chunk_file(cwd).startswith("Second margin.\n\n")
 
 
 def test_redraft_reuses_stored_module(cwd):
@@ -205,7 +208,7 @@ def test_failed_redraft_keeps_previous_file(cwd):
     run("--module", "A", replies=[draft()])
     before = chunk_file(cwd)
     code, _ = run("--redraft", replies=["bad", "bad"])
-    assert code == 1 and status() == "drafted" and chunk_file(cwd) == before
+    assert code == 1 and status() == "normalized" and chunk_file(cwd) == before
 
 
 # --- output and errors -----------------------------------------------------------
@@ -229,16 +232,16 @@ def test_unknown_model_fails(cwd, capsys):
 
 
 def test_usage_row_per_call(cwd):
-    run("--module", "A", replies=[draft(margin="Who am I?"), repair("Plain.")])
-    assert len((cwd / "logs" / "usage.csv").read_text().splitlines()) == 1 + 2
+    _, client = run("--module", "A", replies=[draft(margin="Who am I?"), repair("Plain.")])
+    assert len((cwd / "logs" / "usage.csv").read_text().splitlines()) == 1 + len(client.calls)
 
 
 # --- final-review fixes --------------------------------------------------------
 
 def test_api_error_during_repair_keeps_draft(cwd, capsys):
     code, _ = run("--module", "A", replies=[draft(margin="Who am I?"), connection_error()])
-    assert code == 0 and status() == "drafted"
-    assert chunk_file(cwd).startswith("Who am I? ")
+    assert code == 0 and status() == "normalized"
+    assert chunk_file(cwd).startswith("Who am I?\n\n")
     assert "margin repair failed" in capsys.readouterr().out
     assert "Connection error" in (cwd / "logs" / "errors.log").read_text()
 

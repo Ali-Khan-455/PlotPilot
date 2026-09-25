@@ -71,14 +71,27 @@ def set_status(conn, chunk_id, status):
 
 
 def add_pass(conn, novel_id, chunk_id, kind, model, input_text, output_text,
-             *, module=None, verdict=None, note=None) -> int:
-    """Insert one pass row. Rows are never updated: the verdict is known before insert."""
+             *, module=None, verdict=None, note=None, new_status=None) -> int:
+    """Insert one pass row, and optionally set the chunk's status, in ONE transaction.
+    Rows are never updated: the verdict is known before insert."""
     with conn:
-        return conn.execute(
+        pass_id = conn.execute(
             "INSERT INTO passes (novel_id, chunk_id, kind, model, module, input_text, output_text,"
             " verdict, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (novel_id, chunk_id, kind, model, module, input_text, output_text, verdict, note, _now()),
         ).lastrowid
+        if new_status:
+            conn.execute("UPDATE chunks SET status = ? WHERE id = ?", (new_status, chunk_id))
+        return pass_id
+
+
+def ok_passes(conn, chunk_id, kinds):
+    """All ok passes (verdict IS NULL) of the given kinds, oldest first."""
+    marks = ",".join("?" * len(kinds))
+    return conn.execute(
+        f"SELECT id, kind, output_text FROM passes WHERE chunk_id = ? AND verdict IS NULL"
+        f" AND kind IN ({marks}) ORDER BY id", (chunk_id, *kinds),
+    ).fetchall()
 
 
 def latest_pass(conn, chunk_id, kind, after_id=None):
