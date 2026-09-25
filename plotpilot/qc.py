@@ -112,13 +112,17 @@ def run(c, *, accept=None, edited=False) -> int:
             accept = None
 
         elif status == "checked":
-            gaps = parse_audit(_latest_after_draft(c, "audit")["output_text"])
-            if gaps and not texture_failed and not _latest_after_draft(c, "texture"):
+            audit = _latest_after_draft(c, "audit")
+            gaps = parse_audit(audit["output_text"])
+            # An operator edit after the audit settles texture: never regenerate the operator's text.
+            edited_since = db.latest_pass(c.conn, c.chunk["id"], "operator_edit", after_id=audit["id"])
+            if gaps and not texture_failed and not edited_since and not _latest_after_draft(c, "texture"):
                 c.llm.check_models([c.gen_model])
                 user = fill(P["8"].text, {"[Paste flat lines here]": body, TRACKER: config.EMPTY_TRACKER})
                 try:
                     c.attempt("texture", c.gen_model, user, lambda t: check_rewrite(t, body),
                               max_tokens=config.GEN_MAX_TOKENS, status_for=lambda _: "audited")
+                    c.write()  # the file always holds the text Prompt 7 is about to check
                     continue  # the textured body goes back through Prompt 7 (R4)
                 except (ParseError, LLMError, anthropic.AnthropicError) as e:
                     if not isinstance(e, ParseError):
@@ -128,7 +132,8 @@ def run(c, *, accept=None, edited=False) -> int:
             c.llm.check_models([c.qc_model])
             user = fill(P["9"].text, {"[Paste narration here]": body})
             try:
-                new = c.attempt("tts", c.qc_model, user, lambda t: check_rewrite(t, body),
+                new = c.attempt("tts", c.qc_model, user,
+                                lambda t: check_rewrite(t, body, min_ratio=config.TTS_MIN_RATIO),
                                 max_tokens=config.NORMALIZE_MAX_TOKENS, status_for=lambda _: "normalized")
             except ParseError as e:
                 return _malformed(c, "TTS normalization", e)

@@ -99,7 +99,8 @@ def test_classify_then_draft_retrieves_each_model_once(cwd):
     client = FakeClient(["B", draft()], auto_qc=True)
     main(["--novel", "book.txt"], client=client)
     main(["--novel", "book.txt", "--module", "B"], client=client)
-    assert client.retrieved[:2] == [config.QC_MODEL, config.GEN_MODEL]
+    # run 1: classify (qc); run 2: draft (gen) then QC (qc) — each model once per run, never twice
+    assert client.retrieved == [config.QC_MODEL, config.GEN_MODEL, config.QC_MODEL]
 
 
 def test_hooky_margin_triggers_repair(cwd, capsys):

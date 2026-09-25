@@ -268,3 +268,30 @@ def test_history_prefix_unchanged(cwd):
     chunk_path(cwd).write_text(f"{MARGIN}\n\n{BODY} Edited line.\n")
     run(replies=[PASS, BODY + " Edited line."])
     assert rows()[:len(before)] == before
+
+
+# --- Phase 3 final-review fixes --------------------------------------------------
+
+def test_gate_after_texture_points_at_checked_text(cwd, capsys):
+    fail = '- "Living the dream." INVENTED\nFinal verdict: FAIL'
+    code, _ = run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, TEXTURED, fail])
+    assert code == 0 and status() == "factcheck_failed"
+    assert "Living the dream." in chunk_path(cwd).read_text()
+    assert "[line 3]" in capsys.readouterr().out
+
+
+def test_tts_dropping_words_is_rejected(cwd):
+    long_body = " ".join(f"Sentence {i} happened." for i in range(40))
+    dropped = " ".join(f"Sentence {i} happened." for i in range(37))
+    d = draft().replace(f"\n\n{BODY}", f"\n\n{TARGET} {long_body}")
+    code, _ = run("--module", "A", replies=[d, AUDIT_CLEAN, PASS, f"{TARGET} {dropped}", f"{TARGET} {dropped}"])
+    assert code == 1 and status() == "checked"
+
+
+def test_operator_edit_is_not_retextured(cwd):
+    run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, "short", "short", BODY])  # texture failed
+    chunk_path(cwd).write_text(f"{MARGIN}\n\n{BODY} OPERATOR FIX.\n")
+    code, client = run(replies=[PASS, f"{BODY} OPERATOR FIX."])
+    assert code == 0 and status() == "normalized"
+    assert [c["model"] for c in client.calls] == [config.QC_MODEL, config.QC_MODEL]  # P7 + P9, no P8
+    assert "OPERATOR FIX." in chunk_path(cwd).read_text()

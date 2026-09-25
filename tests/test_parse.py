@@ -111,6 +111,7 @@ def test_quoted_target_matches_unquoted_body():
 
 # --- Phase 3: audit / fact-check / rewrite parsers ----------------------------
 
+from plotpilot import config  # noqa: E402
 from plotpilot.parse import check_rewrite, parse_audit, parse_factcheck  # noqa: E402
 
 AUDIT = """1. **Plot points missing**
@@ -161,7 +162,7 @@ def test_factcheck_pass():
 
 
 def test_factcheck_fail_with_flags():
-    fc = parse_factcheck('- Guard reveals map: MISSING\n- "I stabbed him." INVENTED\n- X: PRESENT\nStep 4: verdict FAIL')
+    fc = parse_factcheck('- Guard reveals map: MISSING\n- "I stabbed him." INVENTED\n- X: PRESENT\nStep 4: FAIL')
     assert not fc.passed
     assert fc.flags == ["- Guard reveals map: MISSING", '- "I stabbed him." INVENTED']
 
@@ -213,3 +214,54 @@ def test_rewrite_short_endings_new_text_accepted(ending):
 def test_rewrite_rejects(bad):
     with pytest.raises(ParseError):
         check_rewrite(bad, " ".join(["word"] * 50))
+
+
+# --- Phase 3 final-review fixes --------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "**Step 4: Final verdict (PASS only if nothing is MISSING or INVENTED)**\nFAIL — two plot points are MISSING.",
+    "**Step 4 — Final verdict:** PASS requires no MISSING items.\n**Result: FAIL**",
+    "Step 4: FAIL",
+    "**Step 4: Final verdict**\n\nFAIL — two plot points are MISSING.",
+    "Final verdict: Fail",
+])
+def test_factcheck_fail_formats(text):
+    assert parse_factcheck(text).passed is False
+
+
+@pytest.mark.parametrize("text", ["Step 4: PASS", "## Step 4: Final Verdict\n**PASS** — no MISSING and no INVENTED items."])
+def test_factcheck_pass_formats(text):
+    assert parse_factcheck(text).passed is True
+
+
+def test_factcheck_quoted_lowercase_pass_is_not_a_verdict():
+    assert parse_factcheck('- "I pass the guard." PRESENT\nVerdict: PASS').passed
+
+
+@pytest.mark.parametrize("neg", ["- None. Every stretch has an aside.", "- None — texture is consistent throughout.",
+                                 "- No stretches longer than 4 sentences without an aside.",
+                                 "No flat stretches detected."])
+def test_audit_realistic_negatives(neg):
+    assert parse_audit(AUDIT.format(gaps=neg)) == []
+
+
+def test_audit_inline_header_item():
+    text = "5. **Texture gaps:** Sentences 12-18 have no aside.\n\n6. **TTS hazards**\n- None"
+    assert parse_audit(text) == ["Sentences 12-18 have no aside."]
+
+
+def test_audit_item_mentioning_tone_drift_is_kept():
+    gaps = parse_audit(AUDIT.format(gaps="1. Sentences 4-9 flat, plus some tone drift."))
+    assert gaps == ["Sentences 4-9 flat, plus some tone drift."]
+
+
+def test_audit_renamed_following_sections_end_it():
+    text = "5. Texture gaps\n- Flat middle\n6. TTS issues\n- digits\n7. Tone\n- ok"
+    assert parse_audit(text) == ["Flat middle"]
+
+
+def test_rewrite_custom_ratio():
+    old = " ".join(["word"] * 100)
+    check_rewrite(" ".join(["word"] * 85), old)  # fine at the default ratio (Prompt 8)
+    with pytest.raises(ParseError):
+        check_rewrite(" ".join(["word"] * 85), old, min_ratio=config.TTS_MIN_RATIO)  # not for Prompt 9

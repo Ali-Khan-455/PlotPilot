@@ -124,7 +124,10 @@ def parse_module(text: str) -> str:
 AUDIT_NEGATIVE_RE = re.compile(
     r"^(?:none|n/a|nothing|no(?: texture)? gaps?)(?: (?:were |was )?(?:found|identified|detected|to report"
     r"|to note))*(?: here)?\.?$", re.I)
-AUDIT_END_RE = re.compile(r"tts hazards|tone drift", re.I)
+AUDIT_NEGATIVE_START_RE = re.compile(r"(?i)^(?:none|n/a|nothing)\b")
+AUDIT_NO_RE = re.compile(r"(?i)^no\b.*\b(?:found|detected|identified|noted|observed|to report|without an aside)\b")
+AUDIT_END_RE = re.compile(r"(?i)^(?:tts|tone)\b")
+MD_HEADER_RE = re.compile(r"^\s*(?:#|\*\*|\d+[.)]\s*\*\*)")
 BULLET_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
 STEP_ECHO_RE = re.compile(r'(?i)state "PRESENT"|list any|list every|give a final')
 PREAMBLE_RE = re.compile(
@@ -151,12 +154,15 @@ def parse_audit(text: str) -> list[str]:
     start = next((i for i, ln in enumerate(lines) if _is_texture_header(ln)), None)
     if start is None:
         raise ParseError("no 'Texture gaps' section in the audit output")
+    inline = re.sub(r"(?i)^.*?texture gaps\W*", "", _strip_md(lines[start]))
     gaps = []
-    for line in lines[start + 1:]:
-        if AUDIT_END_RE.search(line):
-            break
+    for line in [inline] + lines[start + 1:]:
         item = _strip_md(line)
-        if re.search(r"[A-Za-z]", item) and not AUDIT_NEGATIVE_RE.match(item):
+        if line is not inline and (AUDIT_END_RE.match(item) or (MD_HEADER_RE.match(line)
+                                   and re.search(r"(?i)tts|tone|hazard|drift", item))):
+            break  # the section 6/7 header (possibly renamed), never a gap item mentioning drift
+        if (re.search(r"[A-Za-z]", item) and not AUDIT_NEGATIVE_RE.match(item)
+                and not AUDIT_NEGATIVE_START_RE.match(item) and not AUDIT_NO_RE.match(item)):
             gaps.append(item)
     return gaps
 
@@ -175,9 +181,12 @@ def parse_factcheck(text: str) -> Factcheck:
         has_pass, has_fail = re.search(r"\bPASS\b", c), re.search(r"\bFAIL\b", c)
         if has_pass and has_fail:
             continue  # an echoed rule sentence, never a verdict or a flag
-        m = re.search(r"(?i:verdict)[^\n]*\b(PASS|FAIL)\b", c)
-        if m or c.strip(" .:!") in ("PASS", "FAIL"):
-            verdicts.append(m[1] if m else c.strip(" .:!"))
+        # Uppercase PASS/FAIL anywhere is a verdict word; any case counts on a verdict/result/step-4 line.
+        found = re.findall(r"\b(PASS|FAIL)\b", c)
+        if not found and re.search(r"(?i)verdict|result|^step 4", c):
+            found = [w.upper() for w in re.findall(r"(?i)\b(pass|fail)\b", c)]
+        if found:
+            verdicts.extend(found)
             continue
         if re.search(r"\b(MISSING|INVENTED)\b", c):
             if re.match(r"(?i)^\s*step \d+", c) and STEP_ECHO_RE.search(c):
@@ -188,14 +197,15 @@ def parse_factcheck(text: str) -> Factcheck:
     return Factcheck("FAIL" not in verdicts, flags)
 
 
-def check_rewrite(new: str, old: str) -> str:
+def check_rewrite(new: str, old: str, min_ratio: float | None = None) -> str:
     """Validate a Prompt 8/9 rewrite before it replaces the narration."""
+    min_ratio = config.MIN_REWRITE_RATIO if min_ratio is None else min_ratio
     t = new.strip()
     if not t:
         raise ParseError("empty rewrite")
     if "<<<" in t:
         raise ParseError("rewrite contains delimiters")
-    if len(t.split()) < config.MIN_REWRITE_RATIO * len(old.split()):
+    if len(t.split()) < min_ratio * len(old.split()):
         raise ParseError(f"rewrite has {len(t.split())} words, under the minimum for {len(old.split())}")
     lines = t.split("\n")
     if PREAMBLE_RE.match(lines[0].strip()):

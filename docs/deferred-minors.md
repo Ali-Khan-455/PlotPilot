@@ -35,3 +35,18 @@ Minor findings from each phase's final code review. They were deliberately left 
 - [ ] **"Malformed twice" failures are not written to `errors.log`** (`pipeline.py`, draft and classify). They exit 1 with a message only.
 - [ ] **A spec section with a COPY line but no END line crashes with a bare `StopIteration`** (`prompts.py`, `load_prompts`). Raise a clear error naming the section instead.
 - [ ] **No usage row is written when a call fails mid-stream** (`llm.py`, `call`). If `get_final_message` raises, nothing is logged. This may be unavoidable.
+
+## Phase 3 — QC chain
+
+- [ ] **The `check_rewrite` preamble and sign-off heuristics are narrow** (`parse.py`). These leak into narration: `Sure! Here is the normalized narration:`, `Normalized narration:`, `I hope this helps!`, `End of normalized narration.`, and 8-word-plus notes such as `Note: I kept the phonetic hint for Kael unchanged as instructed.`. It also rejects a genuine Prompt 8 cliffhanger ending in `Then the door opened—`, which has no terminal punctuation.
+- [ ] **`parse_factcheck` flags include step headers** (`parse.py`). `**Step 2: PRESENT / MISSING check**` is listed as a flag. `Step 4 — Verdict: FAIL. Reason: 1 MISSING, 1 INVENTED.` gives zero flags; the fallback message covers that case.
+- [ ] **Deleting the margin paragraph silently moves narration into the margin** (`pipeline.py`, `split_file`). Body paragraph 1 becomes the "margin", which is excluded from QC and later overwritten by the hook.
+- [ ] **`split_file` needs an exact `"\n\n"`** (`pipeline.py`). A blank line containing spaces, or an edited Phase 2 legacy single-space file, gets the misleading "keep the margin as its own first paragraph" error.
+- [ ] **A crash after an `operator_edit` insert but before the canonical rewrite records a duplicate edit row** (`pipeline.py`, `sync_file`). Harmless.
+- [ ] **TTS warnings are printed once and never persisted** (`qc.py`). A crash or a rerun doesn't show them again.
+- [ ] **`--repair-margin` on a QC'd chunk passes the stored draft target** (`pipeline.py`). After Prompt 9 or an edit, that sentence may no longer open the body. This is the R20 Phase 5 note, but it applies now.
+- [ ] **Override log robustness** (`qc.py`, `_override`). A reason containing a newline breaks the one-line format. `getpass.getuser()` can raise in a container with no user name.
+- [ ] **An unrecoverable file-format error blocks every flag, including `--redraft`** (`pipeline.py`, `run_chunk1`). The message doesn't say that deleting the file restores it.
+- [ ] **Missing tests:** an edit at `drafted` staying `drafted`; the "your edit … will be fact-checked first" note; a Prompt 8 API error or STOPPED continuing to Prompt 9; the override log being written before the DB row.
+- [ ] **`db.set_status` is dead code** (`db.py`). Remove it, or use it.
+- [ ] **Audit and fact-check log files are written after the DB insert** (`qc.py`). A crash leaves `logs/<slug>/chunk-NN-*.md` one version behind, while the gate header points at it.

@@ -28,3 +28,4 @@ EMPTY_TRACKER = "None yet (this is the first chunk)."
 QC_MAX_TOKENS = 16_000
 NORMALIZE_MAX_TOKENS = 32_000
 MIN_REWRITE_RATIO = 0.8
+TTS_MIN_RATIO = 0.97  # Prompt 9 only turns digits into words; it must not drop text
