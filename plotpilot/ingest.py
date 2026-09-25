@@ -1,5 +1,6 @@
 """Pure text parsing and chunk planning. No I/O."""
 
+import math
 import re
 from dataclasses import dataclass, field, replace
 
@@ -152,3 +153,56 @@ def parse_novel(text: str) -> Parsed:
         prev = (n, c.heading)
 
     return Parsed(chapters, front_words, trailing_words, short, warnings)
+
+
+@dataclass(frozen=True)
+class Chunk:
+    idx: int
+    label: str
+    chapter_start: int
+    chapter_end: int
+    text: str
+    words: int
+
+
+def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
+    chunks: list[Chunk] = []
+    group: list[Chapter] = []
+
+    def add(label, start, end, text, words):
+        chunks.append(Chunk(len(chunks) + 1, label, start, end, text, words))
+
+    def flush():
+        if group:
+            a, b = group[0].idx, group[-1].idx
+            add(f"Ch {a}" if a == b else f"Ch {a}–{b}", a, b,
+                "\n\n".join(f"{c.heading}\n\n{c.body}" for c in group),
+                sum(c.words for c in group))
+            group.clear()
+
+    for ch in chapters:
+        if ch.words > config.MAX_WORDS:
+            flush()
+            # Pack scene segments greedily; one segment over the cap stays oversize.
+            pieces: list[list[str]] = []
+            for seg in split_scenes(ch.body):
+                if pieces and sum(map(count_words, pieces[-1])) + count_words(seg) <= config.MAX_WORDS:
+                    pieces[-1].append(seg)
+                else:
+                    pieces.append([seg])
+            for k, piece in enumerate(pieces, 1):
+                text = "\n\n* * *\n\n".join(piece)
+                if k == 1:
+                    text = f"{ch.heading}\n\n{text}"
+                label = f"Ch {ch.idx}" if len(pieces) == 1 else f"Ch {ch.idx} (part {k}/{len(pieces)})"
+                add(label, ch.idx, ch.idx, text, sum(map(count_words, piece)))
+            continue
+        if len(group) == config.MAX_CHAPTERS or sum(c.words for c in group) + ch.words > config.MAX_WORDS:
+            flush()
+        group.append(ch)
+    flush()
+    return chunks
+
+
+def estimate_tokens(words: int) -> int:
+    return math.ceil(words * config.TOKENS_PER_WORD)

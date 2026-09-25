@@ -144,3 +144,62 @@ def test_short_chapter_mid_book_kept_and_flagged():
     p = parse_novel(text)
     assert [c.heading for c in p.chapters] == ["Chapter 1", "Chapter 2", "Chapter 3"]
     assert p.short_chapters == [2]
+
+
+# --- plan_chunks / estimate_tokens ------------------------------------------
+
+from plotpilot.ingest import Chapter, estimate_tokens, plan_chunks  # noqa: E402
+
+
+def chap(idx, words, body=None):
+    body = body if body is not None else " ".join(["w"] * words)
+    return Chapter(idx, f"Chapter {idx}", idx, body, count_words(body))
+
+
+def scened(n_segments, words_each):
+    return "\n\n* * *\n\n".join(" ".join(["w"] * words_each) for _ in range(n_segments))
+
+
+def test_small_chapters_pack_five_per_chunk():
+    chunks = plan_chunks([chap(i, 100) for i in range(1, 13)])
+    assert [(c.chapter_start, c.chapter_end) for c in chunks] == [(1, 5), (6, 10), (11, 12)]
+    assert [c.label for c in chunks] == ["Ch 1–5", "Ch 6–10", "Ch 11–12"]
+
+
+def test_word_cap_flushes_before_chapter_cap():
+    chunks = plan_chunks([chap(i, 5000) for i in range(1, 5)])
+    assert [(c.chapter_start, c.chapter_end) for c in chunks] == [(1, 2), (3, 4)]
+    assert all(c.words <= 12_000 for c in chunks)
+
+
+def test_long_chapter_splits_at_scene_breaks():
+    ch = chap(1, 0, scened(10, 2000))  # 20k words
+    chunks = plan_chunks([ch])
+    assert [c.label for c in chunks] == ["Ch 1 (part 1/2)", "Ch 1 (part 2/2)"]
+    assert all(c.words <= 12_000 for c in chunks)
+    assert chunks[0].text.startswith("Chapter 1\n\n")
+    assert "Chapter 1" not in chunks[1].text
+    assert "* * *" in chunks[0].text
+
+
+def test_long_chapter_without_breaks_is_one_oversize_chunk():
+    chunks = plan_chunks([chap(1, 15_000)])
+    assert len(chunks) == 1 and chunks[0].label == "Ch 1" and chunks[0].words == 15_000
+
+
+def test_long_chapter_flushes_preceding_chunk():
+    chunks = plan_chunks([chap(1, 100), chap(2, 0, scened(10, 2000)), chap(3, 100)])
+    assert [c.label for c in chunks] == ["Ch 1", "Ch 2 (part 1/2)", "Ch 2 (part 2/2)", "Ch 3"]
+    assert [c.idx for c in chunks] == [1, 2, 3, 4]
+
+
+def test_word_conservation():
+    chapters = [chap(1, 300), chap(2, 0, scened(13, 1500)), chap(3, 11_000), chap(4, 800)]
+    chunks = plan_chunks(chapters)
+    assert sum(c.words for c in chunks) == sum(c.words for c in chapters)
+    assert all(c.words == count_words(c.text) - count_words(
+        "\n".join(ch.heading for ch in chapters if ch.heading in c.text)) for c in chunks)
+
+
+def test_estimate_tokens():
+    assert estimate_tokens(1000) == 1350
