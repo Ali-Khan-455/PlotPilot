@@ -1,12 +1,18 @@
-"""Command-line entry point. Phase 1: ingest the novel and plan chunks."""
+"""Command-line entry point: plan chunks (stage 1), then drive chunk 1 (stage 2)."""
 
 import argparse
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
+
+import anthropic
 
 from plotpilot import config, db
 from plotpilot.ingest import estimate_tokens, parse_novel, plan_chunks
+from plotpilot.llm import LLM, LLMError
+from plotpilot.pipeline import run_chunk1
+from plotpilot.prompts import load_prompts
 
 
 def fail(msg: str) -> int:
@@ -14,11 +20,26 @@ def fail(msg: str) -> int:
     return 1
 
 
-def main(argv=None) -> int:
+def make_client():
+    return anthropic.Anthropic(max_retries=3)
+
+
+def log_error(msg: str):
+    Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
+    with open(Path(config.LOG_DIR) / "errors.log", "a") as f:
+        f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
+
+
+def main(argv=None, client=None) -> int:
     ap = argparse.ArgumentParser(prog="plotpilot", description="Convert a novel into a narration script.")
     ap.add_argument("--novel", required=True, type=Path, help="Path to the novel .txt file.")
-    ap.add_argument("--out", default="./scripts",
-                    help="Output directory for narration (ignored in Phase 1; used by later phases).")
+    ap.add_argument("--out", default="./scripts", help="Output directory for narration files.")
+    ap.add_argument("--module", type=str.upper, choices=["A", "B", "C", "D"],
+                    help="Niche module for the chunk being drafted (Prompt 2).")
+    ap.add_argument("--redraft", action="store_true", help="Redraft chunk 1 even though it is drafted.")
+    ap.add_argument("--repair-margin", action="store_true", help="Force Prompt 3-REPAIR on chunk 1's margin.")
+    ap.add_argument("--gen-model", default=config.GEN_MODEL, help="Model for drafts and repairs.")
+    ap.add_argument("--qc-model", default=config.QC_MODEL, help="Model for classification and QC passes.")
     args = ap.parse_args(argv)
     path: Path = args.novel
 
@@ -47,8 +68,21 @@ def main(argv=None) -> int:
         novel_id = existing[0] if existing else db.save_plan(
             conn, slug, path.stem, str(path), sha, plan_chunks(parsed.chapters))
         rows = db.load_chunks(conn, novel_id)
+        _print_manifest(path, parsed, rows)
+        llm = LLM(client if client is not None else (lambda: make_client()), config.LOG_DIR)
+        try:
+            return run_chunk1(conn, llm, load_prompts(), novel_id, slug, module=args.module,
+                              redraft=args.redraft, repair=args.repair_margin, gen_model=args.gen_model,
+                              qc_model=args.qc_model, out_dir=args.out)
+        except (LLMError, anthropic.AnthropicError) as e:
+            log_error(f"{type(e).__name__}: {e}")
+            print(f"ERROR: {e}")
+            return 1
     finally:
         conn.close()
+
+
+def _print_manifest(path, parsed, rows):
 
     total = sum(c.words for c in parsed.chapters)
     print(f"Novel: {path.stem} — {len(parsed.chapters)} chapters, {total:,} words, {len(rows)} chunks")
@@ -74,5 +108,4 @@ def main(argv=None) -> int:
         print(f"WARNING: source is ~{tokens:,} tokens; Prompt 5 needs the full script and may exceed "
               f"{config.GEN_MODEL}'s {config.GEN_CONTEXT_TOKENS:,}-token context. "
               "Consider splitting the novel into Parts.")
-    print(f"Plan stored in {config.DB_PATH}. Drafting is not built yet (Phase 2).")
-    return 0
+    print(f"Plan stored in {config.DB_PATH}.")

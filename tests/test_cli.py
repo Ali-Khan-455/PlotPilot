@@ -4,6 +4,7 @@ import pytest
 
 import plotpilot.config as config
 from plotpilot.cli import main
+from tests.fakes import FakeClient
 
 BODY = " ".join(["word"] * 100)
 
@@ -26,8 +27,9 @@ def rows(table):
 
 def test_first_run_stores_plan_and_prints_manifest(cwd, capsys):
     write_novel(cwd / "My Novel.txt")
-    assert main(["--novel", "My Novel.txt"]) == 0
+    assert main(["--novel", "My Novel.txt"], client=FakeClient(["B"])) == 0
     out = capsys.readouterr().out
+    assert "Suggested module for chunk 1: B (Romance, Josei, Emotional Drama)" in out
     assert "Novel: My Novel — 7 chapters, 700 words, 2 chunks" in out
     assert "Ch 1–5" in out and "Ch 6–7" in out
     assert rows("novels") == 1 and rows("chunks") == 2
@@ -35,16 +37,16 @@ def test_first_run_stores_plan_and_prints_manifest(cwd, capsys):
 
 def test_second_run_is_idempotent(cwd, capsys):
     write_novel(cwd / "n.txt")
-    main(["--novel", "n.txt"])
+    main(["--novel", "n.txt"], client=FakeClient(["B"]))
     first = capsys.readouterr().out
-    assert main(["--novel", "n.txt"]) == 0
+    assert main(["--novel", "n.txt"], client=FakeClient([])) == 0
     assert capsys.readouterr().out == first
     assert rows("novels") == 1 and rows("chunks") == 2
 
 
 def test_changed_source_is_refused(cwd, capsys):
     novel = write_novel(cwd / "n.txt")
-    main(["--novel", "n.txt"])
+    main(["--novel", "n.txt"], client=FakeClient(["B"]))
     write_novel(novel, n=3)
     assert main(["--novel", "n.txt"]) == 1
     assert "already planned from" in capsys.readouterr().out
@@ -70,7 +72,7 @@ def test_warnings_are_printed(cwd, capsys):
             "Chapter 1\n\nshort\n\nChapter 3\n\n" + BODY + "\n\nChapter 2\n\n" + long_body
             + "\n*** END OF THE PROJECT GUTENBERG EBOOK X ***\nlicence\n")
     (cwd / "n.txt").write_text(text)
-    assert main(["--novel", "n.txt"]) == 0
+    assert main(["--novel", "n.txt"], client=FakeClient(["A"])) == 0
     out = capsys.readouterr().out
     assert "dropped 12 words of front matter" in out
     assert "dropped 10 words of trailing matter" in out
@@ -94,5 +96,5 @@ def test_bad_encoding(cwd, capsys):
 def test_context_warning(cwd, capsys, monkeypatch):
     monkeypatch.setattr(config, "GEN_CONTEXT_TOKENS", 100)
     write_novel(cwd / "n.txt")
-    assert main(["--novel", "n.txt"]) == 0
+    assert main(["--novel", "n.txt"], client=FakeClient(["A"])) == 0
     assert "may exceed claude-sonnet-5's 100-token context" in capsys.readouterr().out
