@@ -3,6 +3,8 @@
 import re
 from dataclasses import dataclass
 
+from plotpilot import config
+
 MARKERS = ["<<<MARGIN_START>>>", "<<<MARGIN_END>>>",
            "<<<TARGET_SENTENCE_START>>>", "<<<TARGET_SENTENCE_END>>>"]
 COUNT_LINE_RE = re.compile(r"^[\s*_(]*margin is (\w+) sentences?[\s.*_)]*$", re.I)
@@ -115,3 +117,96 @@ def parse_module(text: str) -> str:
     if letter not in ("A", "B", "C", "D"):
         raise ParseError(f"expected one of A, B, C, D; got {text.strip()[:40]!r}")
     return letter
+
+
+# --- Phase 3: audit (Prompt 6), fact-check (Prompt 7), rewrite validation (Prompts 8/9) ---
+
+AUDIT_NEGATIVE_RE = re.compile(
+    r"^(?:none|n/a|nothing|no(?: texture)? gaps?)(?: (?:were |was )?(?:found|identified|detected|to report"
+    r"|to note))*(?: here)?\.?$", re.I)
+AUDIT_END_RE = re.compile(r"tts hazards|tone drift", re.I)
+BULLET_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
+STEP_ECHO_RE = re.compile(r'(?i)state "PRESENT"|list any|list every|give a final')
+PREAMBLE_RE = re.compile(
+    r"(?i)^here(?: is|'s) (?:the|your) [^\n]*(?:narration|text|version|rewrite|script)[^\n]*:$")
+SIGNOFF_RE = re.compile(
+    r"(?i)^\s*(?:hope this helps|let me know(?: if[^.!?]*)?|feel free[^.!?]*|happy to help|anything else)"
+    r"[.!?]?\s*$")
+
+
+def _strip_md(line: str) -> str:
+    return re.sub(r"[*_`#>]", "", BULLET_RE.sub("", line)).strip()
+
+
+def _is_texture_header(line: str) -> bool:
+    if "texture gaps" not in line.lower():
+        return False
+    return bool(re.match(r"^\s*(?:\d+[.)]|#|\*\*)", line)
+                or re.fullmatch(r"\s*texture gaps\s*:?\s*", _strip_md(line), re.I))
+
+
+def parse_audit(text: str) -> list[str]:
+    """Prompt 6 section 5: the texture-gap items (empty when the section says there are none)."""
+    lines = text.split("\n")
+    start = next((i for i, ln in enumerate(lines) if _is_texture_header(ln)), None)
+    if start is None:
+        raise ParseError("no 'Texture gaps' section in the audit output")
+    gaps = []
+    for line in lines[start + 1:]:
+        if AUDIT_END_RE.search(line):
+            break
+        item = _strip_md(line)
+        if re.search(r"[A-Za-z]", item) and not AUDIT_NEGATIVE_RE.match(item):
+            gaps.append(item)
+    return gaps
+
+
+@dataclass(frozen=True)
+class Factcheck:
+    passed: bool
+    flags: list[str]
+
+
+def parse_factcheck(text: str) -> Factcheck:
+    """Prompt 7: the verdict (fail closed) and the MISSING/INVENTED lines."""
+    verdicts, flags = [], []
+    for line in text.split("\n"):
+        c = re.sub(r"[*_`#>]", "", line).strip()
+        has_pass, has_fail = re.search(r"\bPASS\b", c), re.search(r"\bFAIL\b", c)
+        if has_pass and has_fail:
+            continue  # an echoed rule sentence, never a verdict or a flag
+        m = re.search(r"(?i:verdict)[^\n]*\b(PASS|FAIL)\b", c)
+        if m or c.strip(" .:!") in ("PASS", "FAIL"):
+            verdicts.append(m[1] if m else c.strip(" .:!"))
+            continue
+        if re.search(r"\b(MISSING|INVENTED)\b", c):
+            if re.match(r"(?i)^\s*step \d+", c) and STEP_ECHO_RE.search(c):
+                continue
+            flags.append(line.strip())
+    if not verdicts:
+        raise ParseError("no PASS/FAIL verdict in the fact-check output")
+    return Factcheck("FAIL" not in verdicts, flags)
+
+
+def check_rewrite(new: str, old: str) -> str:
+    """Validate a Prompt 8/9 rewrite before it replaces the narration."""
+    t = new.strip()
+    if not t:
+        raise ParseError("empty rewrite")
+    if "<<<" in t:
+        raise ParseError("rewrite contains delimiters")
+    if len(t.split()) < config.MIN_REWRITE_RATIO * len(old.split()):
+        raise ParseError(f"rewrite has {len(t.split())} words, under the minimum for {len(old.split())}")
+    lines = t.split("\n")
+    if PREAMBLE_RE.match(lines[0].strip()):
+        raise ParseError("rewrite starts with a preamble")
+    if lines[0].strip().startswith("```") or lines[-1].strip().startswith("```"):
+        raise ParseError("rewrite is wrapped in a code fence")
+    paras = re.split(r"\n\s*\n", t)
+    last = paras[-1].strip()
+    if len(paras) > 1 and len(last.split()) < 8 and _normalize(last) not in _normalize(old):
+        ends_ok = last.endswith((".", "!", "?", '"', "”", "’", "'"))
+        quoted = any(q in last for q in '"“”')
+        if not ends_ok or (not quoted and SIGNOFF_RE.match(last)):
+            raise ParseError(f"rewrite ends with a sign-off: {last!r}")
+    return t

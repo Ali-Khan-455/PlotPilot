@@ -107,3 +107,109 @@ def test_body_restating_margin_is_accepted():
 def test_quoted_target_matches_unquoted_body():
     d = parse_draft(out(target=f'"{TARGET}"', after=f"margin is 1 sentence.\n\n{TARGET} Rest."))
     assert d.body.count("Nobody") == 1
+
+
+# --- Phase 3: audit / fact-check / rewrite parsers ----------------------------
+
+from plotpilot.parse import check_rewrite, parse_audit, parse_factcheck  # noqa: E402
+
+AUDIT = """1. **Plot points missing**
+- None
+
+4. **POV violations**
+- None
+
+5. **Texture gaps**
+{gaps}
+
+6. **TTS hazards**
+- "1984" not written as words
+
+7. **Tone drift**
+- None
+"""
+
+
+def test_audit_numbered_gaps_returned():
+    gaps = parse_audit(AUDIT.format(gaps="1. Sentences 3-9 read flat.\n2. No MC aside across sentences 12-18."))
+    assert gaps == ["Sentences 3-9 read flat.", "No MC aside across sentences 12-18."]
+
+
+def test_audit_bold_colon_header_not_an_item():
+    text = "Intro: I checked for texture gaps carefully.\n\n**Texture gaps:**\n- Gap one\n- Gap two\n\n**TTS hazards:**\n- None"
+    assert parse_audit(text) == ["Gap one", "Gap two"]
+
+
+def test_audit_markdown_header():
+    assert parse_audit("## Texture gaps\n* Flat stretch in paragraph 2\n## Tone drift\n* None") == \
+        ["Flat stretch in paragraph 2"]
+
+
+@pytest.mark.parametrize("neg", ["- None", "- No gaps found.", "None identified.", "Nothing found to report.",
+                                 "No gaps identified here.", "- N/A", "---"])
+def test_audit_negatives(neg):
+    assert parse_audit(AUDIT.format(gaps=neg)) == []
+
+
+def test_audit_missing_header():
+    with pytest.raises(ParseError):
+        parse_audit("1. Plot points\n- None")
+
+
+def test_factcheck_pass():
+    assert parse_factcheck("Step 1...\n**Final verdict: PASS**").passed
+
+
+def test_factcheck_fail_with_flags():
+    fc = parse_factcheck('- Guard reveals map: MISSING\n- "I stabbed him." INVENTED\n- X: PRESENT\nStep 4: verdict FAIL')
+    assert not fc.passed
+    assert fc.flags == ["- Guard reveals map: MISSING", '- "I stabbed him." INVENTED']
+
+
+def test_factcheck_echoed_rule_then_fail():
+    text = ('**Step 4: Give a final verdict: "PASS" if no MISSING and no INVENTED; "FAIL" otherwise.**\n'
+            '- "I flew." INVENTED\n\nFAIL')
+    assert not parse_factcheck(text).passed
+
+
+def test_factcheck_step2_echo_not_a_flag():
+    text = ('Step 2: For each, state "PRESENT" or "MISSING" in the narration.\n'
+            'Step 3: "I stabbed the guard." INVENTED\nFinal verdict: FAIL')
+    assert parse_factcheck(text).flags == ['Step 3: "I stabbed the guard." INVENTED']
+
+
+def test_factcheck_conflicting_candidates_fail_closed():
+    assert not parse_factcheck("Verdict: PASS\n...\nVerdict: FAIL").passed
+
+
+def test_factcheck_no_verdict():
+    with pytest.raises(ParseError):
+        parse_factcheck("Everything looks present.")
+
+
+OLD = " ".join(["word"] * 50) + " I ran. \"Run.\" \"Let me know,\" she said."
+
+
+@pytest.mark.parametrize("ending", ["I ran.", "“Run.”", '"Let me know," she said.'])
+def test_rewrite_short_endings_in_input_accepted(ending):
+    check_rewrite(" ".join(["word"] * 50) + "\n\n" + ending, OLD)
+
+
+@pytest.mark.parametrize("ending", ["I fled.", "“Stop.”", '"Let me know," he said.',
+                                    "She's happy to help.", "The guard let me know the way."])
+def test_rewrite_short_endings_new_text_accepted(ending):
+    check_rewrite(" ".join(["word"] * 50) + "\n\n" + ending, " ".join(["word"] * 50))
+
+
+@pytest.mark.parametrize("bad", [
+    "",
+    "<<<MARGIN_START>>> " + " ".join(["word"] * 50),
+    " ".join(["word"] * 25),
+    "Here is the normalized narration:\n" + " ".join(["word"] * 50),
+    "```\n" + " ".join(["word"] * 50) + "\n```",
+    " ".join(["word"] * 50) + "\n\nHope this helps.",
+    " ".join(["word"] * 50) + "\n\nLet me know if you need anything.",
+])
+def test_rewrite_rejects(bad):
+    with pytest.raises(ParseError):
+        check_rewrite(bad, " ".join(["word"] * 50))

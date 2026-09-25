@@ -23,3 +23,8 @@ CLASSIFY_WORDS = 2_000
 
 SPEC_PATH = Path(__file__).resolve().parent.parent / "prompts" / "v4-spec.md"
 LOG_DIR = "logs"
+
+EMPTY_TRACKER = "None yet (this is the first chunk)."
+QC_MAX_TOKENS = 16_000
+NORMALIZE_MAX_TOKENS = 32_000
+MIN_REWRITE_RATIO = 0.8
