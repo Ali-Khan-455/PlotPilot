@@ -1,6 +1,6 @@
 # NOVEL-TO-SCRIPT CONVERSION SYSTEM v4
 
-Built for converting a full novel (5–8 chapters at a time) into a TTS-ready YouTube narration script. **First-person MC POV. Texture mandatory.** Adapted from the original 3-prompt manhwa recap system, re-engineered for novel source material, with a continuity mechanism for multi-chunk processing, a deferred hook mechanism that lets the opening line be written with knowledge of the whole part, and a texture enforcement layer modeled on successful recap channels.
+Built for converting a full novel (up to 5 chapters at a time) into a TTS-ready YouTube narration script. **First-person MC POV. Texture mandatory.** Adapted from the original 3-prompt manhwa recap system, re-engineered for novel source material, with a continuity mechanism for multi-chunk processing, a deferred hook mechanism that lets the opening line be written with knowledge of the whole part, and a texture enforcement layer modeled on successful recap channels.
 
 ---
 
@@ -13,7 +13,7 @@ Built for converting a full novel (5–8 chapters at a time) into a TTS-ready Yo
 3. Prompt 3 (Opening Margin Layer) — **only** on the very first chunk of Part 1 of a brand-new novel. Never again after that, not even at the start of Part 2, 3, etc.
 4. Prompt 4 (Chunk Continuation Layer) — on every chunk **except** the very first one
 5. Your Continuity Tracker (filled in with everything established so far) — on every chunk except the very first one
-6. The chapter text for this chunk (5–8 chapters, ~7–12k words)
+6. The chapter text for this chunk (5 chapters maximum, ~7–12k words)
 
 The AI processes immediately — nothing here waits for a follow-up message.
 
@@ -24,7 +24,8 @@ The AI processes immediately — nothing here waits for a follow-up message.
 3. **Texture repair pass** (Prompt 8) — only if the output reads flat.
 4. **TTS normalization pass** (Prompt 9) — numbers to words, acronyms expanded, homographs disambiguated, punctuation cleaned.
 5. **Skim and fix** — read aloud at 2x, catch what the automated passes missed.
-6. **Update the Continuity Tracker** with what that chunk introduced.
+6. **Update the Continuity Tracker** with what that chunk introduced (Prompt 10 — Tracker Extraction, reviewed by the operator before it is merged).
+7. **Extract scene metadata** (Prompt 11 — Metadata Extraction) for the parallel metadata file.
 
 On chunk 1 specifically, check the margin against Prompt 3's self-check — if it reads hook-flavored (a rhetorical question, "little did he know" phrasing, dramatic word choice), run Prompt 3-REPAIR immediately to fix just the margin before continuing.
 
@@ -165,7 +166,7 @@ It sounds spoken. Short, clean sentences. No em-dashes. No semicolons. No nested
 
 **TTS normalization baked in:**
 
-Write all numbers as words (1984 → nineteen eighty-four). Expand acronyms on first use (NASA → N.A.S.A., or "the space agency"). Avoid homographs that could be misread (read/read, lead/lead). No ellipses or parentheses. Commas and periods only for punctuation.
+Write all numbers as words (1984 → nineteen eighty-four). Expand acronyms on first use (NASA → N.A.S.A., or "the space agency"). Avoid homographs that could be misread (read/read, lead/lead). No ellipses or parentheses. Baseline punctuation is comma and period. Question marks, exclamation points, colons, and quotation marks are also allowed. Nothing else.
 
 If a name is genuinely hard to pronounce, give a simple phonetic hint in brackets the first time only (e.g., "Kael [rhymes with 'kale']"). Use sparingly.
 
@@ -459,13 +460,62 @@ Output only the normalized narration. No explanation.
 
 ---
 
+## PROMPT 10 — Tracker Extraction (run after every chunk, after Prompt 9)
+
+**COPY EVERYTHING BELOW**
+
+You are updating the Continuity Tracker for a novel-to-script conversion. Read the finished narration for this chunk and the current Continuity Tracker. List only what this chunk added. Do not repeat anything already in the tracker. Do not rewrite the tracker.
+
+Output one JSON object and nothing else, with exactly these keys:
+
+```
+{
+  "new_characters": [{"name": "Full Name", "stand_in": "casual stand-in used in the narration"}],
+  "new_terms": [{"term": "term", "meaning": "what it means"}],
+  "new_comparisons": ["comparison or reference used"],
+  "new_texture_motifs": ["texture aside used, quoted as written"],
+  "chunk_end_state": "1–2 sentences on where this chunk leaves off",
+  "nickname_collisions": ["any stand-in in this chunk already assigned to a different character in the tracker"]
+}
+```
+
+Use an empty list when a key has nothing new. Never include the MC in "new_characters". The MC is always "I."
+
+[Paste Continuity Tracker]
+
+[Paste finished narration for this chunk]
+
+**END OF PROMPT 10**
+
+---
+
+## PROMPT 11 — Metadata Extraction (run after every chunk, after Prompt 9)
+
+**COPY EVERYTHING BELOW**
+
+You are marking scene changes in a finished narration script for later image sync. Read the narration below. Each time the scene changes (new location, new time, new major event), record it.
+
+Output one JSON array and nothing else. Each item is:
+
+```
+{"scene": "one-line description of what is happening", "first_sentence": "the first sentence of that scene, copied verbatim from the narration"}
+```
+
+The first item starts at the first sentence of the narration. Copy "first_sentence" exactly, character for character. Do not add anything to the narration.
+
+[Paste finished narration for this chunk]
+
+**END OF PROMPT 11**
+
+---
+
 ## CHUNKING STRATEGY
 
 Process 5 chapters per chunk maximum (roughly 7–12k words of source text per pass), not the full 20–25 chapter batch at once. A single AI response covering an entire part would need to generate close to as much text as it read in — 25–30k words of narration in one shot — and quality reliably drifts over an output that long: repeated phrasing, forgotten continuity, degraded texture. Smaller chunks keep output length in a range the model sustains quality across, let you catch and fix problems before they compound, and let you review as you go.
 
 For a 20–25 chapter part, that's roughly 4–5 chunks. Update the Continuity Tracker after each one. Keep chunk 1's raw output on hand (specifically the sentence immediately following its placeholder margin, verbatim) until Prompt 5 runs — you'll need it to splice the real hook in.
 
-**Pre-plan chunk boundaries before generating anything.** Divide the novel at chapter breaks. If a chapter exceeds 12k words, split at a scene break. Mark every boundary in the Continuity Tracker. This prevents mid-scene cuts and lets the AI end each chunk on the strongest available cliffhanger.
+**Pre-plan chunk boundaries before generating anything.** Divide the novel at chapter breaks. Chunks exceeding 12k words split at the nearest scene break. A single chapter over 12k words becomes its own chunk. Mark every boundary in the Continuity Tracker. This prevents mid-scene cuts and lets the AI end each chunk on the strongest available cliffhanger.
 
 **Self-audit and fact-check every chunk** (Prompts 6 and 7) before moving on. This is not optional — it's what catches invention and omission before they compound across the whole run.
 
@@ -479,7 +529,7 @@ For a 20–25 chapter part, that's roughly 4–5 chunks. Update the Continuity T
 4. If texture reads flat, run Prompt 8 (Texture Repair).
 5. Run Prompt 9 (TTS Normalization).
 6. Read the final output aloud at 2x. Your ear catches what the passes missed.
-7. Update the Continuity Tracker: new characters, terms, comparisons, texture motifs, chunk-end state.
+7. Update the Continuity Tracker with Prompt 10: new characters, terms, comparisons, texture motifs, chunk-end state. Operator reviews before merge.
 8. If chunk 1: verify margin delimiters are clean and the target sentence is logged verbatim.
 
 ---
