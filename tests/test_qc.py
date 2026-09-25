@@ -34,7 +34,8 @@ def cwd(tmp_path, monkeypatch):
     return tmp_path
 
 
-def run(*args, replies=(), auto_qc=False):
+def run(*args, replies=(), auto_qc=True):
+    # Scripted replies are consumed first; auto_qc then answers Prompts 10/11 (Phase 4) cleanly.
     client = FakeClient(replies, auto_qc=auto_qc)
     return main(["--novel", "book.txt", *args], client=client), client
 
@@ -65,8 +66,8 @@ def user_msg(client, i):
 
 def test_happy_path(cwd, capsys):
     code, client = run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
-    assert code == 0 and status() == "normalized"
-    assert [c["model"] for c in client.calls] == [config.GEN_MODEL] + [config.QC_MODEL] * 3
+    assert code == 0 and status() == "tracker_pending"
+    assert [c["model"] for c in client.calls] == [config.GEN_MODEL] + [config.QC_MODEL] * 5  # + P10, P11
     audit_user, fc_user = user_msg(client, 1), user_msg(client, 2)
     for u in (audit_user, fc_user):
         assert BODY in u and "Chapter 1" in u and MARGIN not in u
@@ -75,21 +76,21 @@ def test_happy_path(cwd, capsys):
     assert ("Chunk complete. Recommended next step: read aloud at 2x for tone and texture drift "
             "before continuing.") in out
     assert chunk_path(cwd).read_text() == f"{MARGIN}\n\n{BODY}\n"
-    assert kinds() == ["draft", "audit", "factcheck", "tts"]
+    assert kinds() == ["draft", "audit", "factcheck", "tts", "tracker_delta", "scenes"]
     assert (cwd / "logs" / "book" / "chunk-01-audit.md").read_text() == AUDIT_CLEAN
 
 
 def test_texture_then_recheck(cwd):
     code, client = run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, TEXTURED, PASS, TEXTURED])
-    assert code == 0 and status() == "normalized"
-    assert kinds() == ["draft", "audit", "factcheck", "texture", "factcheck", "tts"]
+    assert code == 0 and status() == "tracker_pending"
+    assert kinds() == ["draft", "audit", "factcheck", "texture", "factcheck", "tts", "tracker_delta", "scenes"]
     assert client.calls[3]["model"] == config.GEN_MODEL
     assert TEXTURED in chunk_path(cwd).read_text()
 
 
 def test_texture_failure_keeps_body(cwd, capsys):
     code, _ = run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, "short", "short", BODY])
-    assert code == 0 and status() == "normalized"
+    assert code == 0 and status() == "tracker_pending"
     assert "texture repair failed" in capsys.readouterr().out
 
 
@@ -110,8 +111,8 @@ def test_operator_edit_after_fail(cwd):
     edited = f"{MARGIN}\n\n{TARGET} Then the guard came and revealed the map.\n"
     chunk_path(cwd).write_text(edited)
     code, client = run(replies=[PASS, "Nobody expected much from me. Then the guard came and revealed the map."])
-    assert code == 0 and status() == "normalized"
-    assert kinds()[-3:] == ["operator_edit", "factcheck", "tts"]
+    assert code == 0 and status() == "tracker_pending"
+    assert kinds()[-5:] == ["operator_edit", "factcheck", "tts", "tracker_delta", "scenes"]
     assert "revealed the map" in user_msg(client, 0)
 
 
@@ -129,7 +130,7 @@ def test_wrapped_margin_edit_is_canonicalised(cwd):
 def test_override(cwd, capsys):
     run("--module", "A", replies=[draft(), AUDIT_CLEAN, FAIL])
     code, _ = run("--accept-factcheck=false positive on paraphrase", replies=[BODY])
-    assert code == 0 and status() == "normalized"
+    assert code == 0 and status() == "tracker_pending"
     override = [r for r in rows() if r[0] == "factcheck_override"][0]
     assert override[3] == "false positive on paraphrase" and "MISSING" in override[4]
     log = (cwd / "logs" / "factcheck-overrides.log").read_text()
@@ -166,12 +167,12 @@ def test_truncated_tts_retried_then_fails(cwd):
     code, _ = run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, half, half])
     assert code == 1 and status() == "checked"
     code, _ = run(replies=[BODY])
-    assert code == 0 and status() == "normalized"
+    assert code == 0 and status() == "tracker_pending"
 
 
 def test_tts_warning_printed(cwd, capsys):
     code, _ = run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY + " It was 1984."])
-    assert code == 0 and status() == "normalized"
+    assert code == 0 and status() == "tracker_pending"
     assert "WARNING: TTS hazard line 1 (digit)" in capsys.readouterr().out
 
 
@@ -233,7 +234,7 @@ def test_crash_after_texture_rechecks(cwd):
     code, _ = run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, TEXTURED, connection_error()])
     assert status() == "audited"  # texture stored atomically with 'audited'
     code, client = run(replies=[PASS, TEXTURED])
-    assert code == 0 and kinds()[-2:] == ["factcheck", "tts"]
+    assert code == 0 and kinds()[-4:] == ["factcheck", "tts", "tracker_delta", "scenes"]
 
 
 def test_no_ok_draft_means_no_state(cwd):
@@ -250,14 +251,14 @@ def test_no_ok_draft_means_no_state(cwd):
 def test_redraft_on_normalized_reruns_qc(cwd):
     run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
     code, _ = run("--redraft", replies=[draft(margin="Second."), AUDIT_CLEAN, PASS, BODY])
-    assert code == 0 and status() == "normalized"
-    assert kinds()[-4:] == ["draft", "audit", "factcheck", "tts"]
+    assert code == 0 and status() == "tracker_pending"
+    assert kinds()[-6:] == ["draft", "audit", "factcheck", "tts", "tracker_delta", "scenes"]
 
 
 def test_repair_margin_on_normalized(cwd):
     run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
     code, client = run("--repair-margin", replies=["<<<MARGIN_START>>>\nPlain.\n<<<MARGIN_END>>>"])
-    assert code == 0 and status() == "normalized" and len(client.calls) == 1
+    assert code == 0 and status() == "tracker_pending" and len(client.calls) == 1
     assert chunk_path(cwd).read_text() == f"Plain.\n\n{BODY}\n"
 
 
@@ -292,6 +293,6 @@ def test_operator_edit_is_not_retextured(cwd):
     run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, "short", "short", BODY])  # texture failed
     chunk_path(cwd).write_text(f"{MARGIN}\n\n{BODY} OPERATOR FIX.\n")
     code, client = run(replies=[PASS, f"{BODY} OPERATOR FIX."])
-    assert code == 0 and status() == "normalized"
-    assert [c["model"] for c in client.calls] == [config.QC_MODEL, config.QC_MODEL]  # P7 + P9, no P8
+    assert code == 0 and status() == "tracker_pending"
+    assert [c["model"] for c in client.calls] == [config.QC_MODEL] * 4  # P7 + P9 + P10 + P11, no P8
     assert "OPERATOR FIX." in chunk_path(cwd).read_text()

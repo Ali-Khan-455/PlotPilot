@@ -10,7 +10,7 @@ import anthropic
 from plotpilot import config, db
 from plotpilot.ingest import estimate_tokens, parse_novel, plan_chunks
 from plotpilot.llm import LLM, LLMError, log_error
-from plotpilot.pipeline import run_chunk1
+from plotpilot.pipeline import run_novel
 from plotpilot.prompts import load_prompts
 
 
@@ -35,7 +35,11 @@ def main(argv=None, client=None) -> int:
     ap.add_argument("--qc-model", default=config.QC_MODEL, help="Model for classification and QC passes.")
     ap.add_argument("--accept-factcheck", metavar="REASON",
                     help="Accept a failed fact-check for the current chunk; the reason is logged.")
+    ap.add_argument("--accept-tracker", action="store_true",
+                    help="Merge the reviewed tracker update for the current chunk.")
     args = ap.parse_args(argv)
+    if args.redraft and args.accept_tracker:
+        return fail("--redraft and --accept-tracker can't be combined.")
     if args.accept_factcheck is not None and not args.accept_factcheck.strip():
         return fail("--accept-factcheck needs a non-empty reason.")
     path: Path = args.novel
@@ -68,10 +72,11 @@ def main(argv=None, client=None) -> int:
         _print_manifest(path, parsed, rows)
         llm = LLM(client if client is not None else (lambda: make_client()), config.LOG_DIR)
         try:
-            return run_chunk1(conn, llm, load_prompts(), novel_id, slug, module=args.module,
+            return run_novel(conn, llm, load_prompts(), novel_id, slug, path.stem, module=args.module,
                               redraft=args.redraft, repair=args.repair_margin, gen_model=args.gen_model,
                               qc_model=args.qc_model, out_dir=args.out,
-                              accept=args.accept_factcheck.strip() if args.accept_factcheck else None)
+                              accept=args.accept_factcheck.strip() if args.accept_factcheck else None,
+                              accept_tracker=args.accept_tracker)
         except (LLMError, anthropic.AnthropicError) as e:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}")

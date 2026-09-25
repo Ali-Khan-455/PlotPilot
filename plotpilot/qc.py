@@ -2,16 +2,18 @@
 Prompt 9 TTS normalization, deterministic TTS check. Resumes from chunks.status."""
 
 import getpass
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
 
-from plotpilot import config, db
+from plotpilot import config, db, tracker
 from plotpilot.llm import LLMError, log_error
-from plotpilot.parse import ParseError, check_rewrite, parse_audit, parse_factcheck
-from plotpilot.pipeline import narration_state
+from plotpilot.parse import (ParseError, check_rewrite, count_sentences, first_sentence, parse_audit,
+                             parse_factcheck)
+from plotpilot.pipeline import TEXT_KINDS, narration_state
 from plotpilot.prompts import fill
 from plotpilot.tts_check import tts_hazards
 
@@ -60,7 +62,7 @@ def _override(c, reason):
     flags = " || ".join(fc.flags) if fc.flags else "(no flags parsed)"
     Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
     with open(Path(config.LOG_DIR) / "factcheck-overrides.log", "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now(timezone.utc).isoformat()} | {c.slug} | chunk {c.chunk['idx']} | "
+        f.write(f"{datetime.now(timezone.utc).isoformat()} | {c.slug} | chunk {c.idx} | "
                 f"{getpass.getuser()} | {reason} | {flags}\n")
     db.add_pass(c.conn, c.novel_id, c.chunk["id"], "factcheck_override", None, "", flags, note=reason,
                 new_status="checked")
@@ -68,15 +70,103 @@ def _override(c, reason):
 
 
 def _malformed(c, what, e):
-    print(f"Chunk {c.chunk['idx']} {what} output was {e}; raw outputs are stored. Re-run to try again.")
+    print(f"Chunk {c.idx} {what} output was {e}; raw outputs are stored. Re-run to try again.")
     return 1
 
 
-def run(c, *, accept=None, edited=False) -> int:
+BODY_KINDS = tuple(k for k in TEXT_KINDS if k != "margin_repair")  # P10/P11 read the body only
+
+
+def _latest_body_change(c):
+    rows = [r for r in db.ok_passes(c.conn, c.chunk["id"], BODY_KINDS)]
+    return rows[-1]["id"] if rows else 0
+
+
+def _pending_path(c, delta_pass_id) -> Path:
+    return Path(config.TRACKER_DIR) / f"{c.slug}.chunk-{c.idx:02d}.delta-{delta_pass_id}.pending.json"
+
+
+def _pass_delta(c, pass_id):
+    row = c.conn.execute("SELECT output_text FROM passes WHERE id = ?", (pass_id,)).fetchone()
+    return tracker.validate_delta(tracker.extract_json(row["output_text"])) if row else None
+
+
+def _current_tracker(c) -> dict:
+    raw = db.latest_tracker(c.conn, c.novel_id)
+    return json.loads(raw) if raw else tracker.empty()
+
+
+def _tracker_gate(c):
+    """Bind the pending file to the latest ok delta pass, clear any other pending file, print the summary."""
+    d = db.latest_pass(c.conn, c.chunk["id"], "tracker_delta")
+    bound = _pending_path(c, d["id"])
+    for old in sorted(Path(config.TRACKER_DIR).glob(f"{c.slug}.chunk-*.delta-*.pending.json")):
+        if old == bound:
+            continue
+        m = re.match(rf"{re.escape(c.slug)}\.chunk-(\d+)\.delta-(\d+)\.pending\.json$", old.name)
+        if m and int(m[1]) == c.idx:
+            try:
+                edited = json.loads(old.read_text(encoding="utf-8")) != _pass_delta(c, int(m[2]))
+            except (ValueError, ParseError):
+                edited = True
+            if edited:
+                print(f"Note: your edits to {old} were superseded by a new tracker delta.")
+        old.unlink()
+    delta = tracker.validate_delta(tracker.extract_json(d["output_text"]))
+    if not bound.exists():
+        bound.parent.mkdir(parents=True, exist_ok=True)
+        bound.write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Tracker update for chunk {c.idx}: {len(delta['new_characters'])} new characters, "
+          f"{len(delta['new_terms'])} terms, {len(delta['new_comparisons'])} comparisons, "
+          f"{len(delta['new_texture_motifs'])} texture motifs.")
+    print(f"Chunk end state: {delta['chunk_end_state']}")
+    for col in delta["nickname_collisions"] + tracker.merge_collisions(_current_tracker(c), delta):
+        print(f"WARNING: nickname collision: {col}")
+    print(f"Review/edit {bound}, then re-run with --accept-tracker to merge.")
+
+
+def _accept_tracker(c) -> bool:
+    d = db.latest_pass(c.conn, c.chunk["id"], "tracker_delta")
+    bound = _pending_path(c, d["id"])
+    if not bound.exists():
+        print(f"Pending file {bound} not found; re-run without --accept-tracker to regenerate it.")
+        return False
+    try:
+        delta = tracker.validate_delta(json.loads(bound.read_text(encoding="utf-8")))
+    except (ValueError, ParseError) as e:
+        print(f"Pending file {bound} is invalid: {e}")
+        return False
+    merged = tracker.merge(_current_tracker(c), delta, c.idx)
+    if c.first:
+        state = narration_state(c.conn, c.chunk["id"])
+        merged["chunk1"] = {"margin": state.margin, "margin_sentences": count_sentences(state.margin),
+                            "target": first_sentence(state.body)}
+    db.add_tracker_version(c.conn, c.novel_id, c.chunk["id"], json.dumps(merged, ensure_ascii=False),
+                           json.dumps(delta, ensure_ascii=False), new_status="done")
+    bound.unlink()
+    _write_mirror(c, merged)
+    print(f"Tracker updated for chunk {c.idx}.")
+    return True
+
+
+def _write_mirror(c, merged):
+    rows = db.chunks(c.conn, c.novel_id)
+    overrides = c.conn.execute(
+        "SELECT c.idx, p.note FROM passes p JOIN chunks c ON c.id = p.chunk_id"
+        " WHERE p.novel_id = ? AND p.kind = 'factcheck_override' ORDER BY p.id", (c.novel_id,)).fetchall()
+    text = tracker.render(merged, title=c.title, chunks=[(r["idx"], r["label"]) for r in rows],
+                          progress=f"Part 1, Chunk {c.idx} — {c.chunk['label']} processed so far",
+                          overrides=[(r["idx"], r["note"]) for r in overrides])
+    path = Path(config.TRACKER_DIR) / f"{c.slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
     P, src = c.P, c.chunk["source_text"]
     if accept is not None and c.status != "factcheck_failed":
-        print("Note: --accept-factcheck ignored; your edit to chunk-01.txt will be fact-checked first."
-              if edited else "Note: --accept-factcheck ignored; chunk 1 has no failed fact-check.")
+        print(f"Note: --accept-factcheck ignored; your edit to {c.path.name} will be fact-checked first."
+              if edited else f"Note: --accept-factcheck ignored; chunk {c.idx} has no failed fact-check.")
         accept = None
     texture_failed = False
     while True:
@@ -85,7 +175,7 @@ def run(c, *, accept=None, edited=False) -> int:
 
         if status == "drafted":
             c.llm.check_models([c.qc_model])
-            user = fill(P["6"].text, {SOURCE: src, NARRATION: body, TRACKER: config.EMPTY_TRACKER})
+            user = fill(P["6"].text, {SOURCE: src, NARRATION: body, TRACKER: c.prompt_tracker()})
             try:
                 out = c.attempt("audit", c.qc_model, user, lambda t: (parse_audit(t), t),
                                 max_tokens=config.QC_MAX_TOKENS, status_for=lambda _: "audited")
@@ -118,7 +208,7 @@ def run(c, *, accept=None, edited=False) -> int:
             edited_since = db.latest_pass(c.conn, c.chunk["id"], "operator_edit", after_id=audit["id"])
             if gaps and not texture_failed and not edited_since and not _latest_after_draft(c, "texture"):
                 c.llm.check_models([c.gen_model])
-                user = fill(P["8"].text, {"[Paste flat lines here]": body, TRACKER: config.EMPTY_TRACKER})
+                user = fill(P["8"].text, {"[Paste flat lines here]": body, TRACKER: c.prompt_tracker()})
                 try:
                     c.attempt("texture", c.gen_model, user, lambda t: check_rewrite(t, body),
                               max_tokens=config.GEN_MAX_TOKENS, status_for=lambda _: "audited")
@@ -147,7 +237,40 @@ def run(c, *, accept=None, edited=False) -> int:
         elif status == "normalized":
             c.write()
             print(READ_ALOUD)
-            print(f"Chunk {c.chunk['idx']} QC complete → {c.path}. Tracker update is not built yet (Phase 4).")
+            print(f"Chunk {c.idx} QC complete → {c.path}.")
+            changed = _latest_body_change(c)
+            d = db.latest_pass(c.conn, c.chunk["id"], "tracker_delta")
+            if not d or d["id"] < changed:
+                c.llm.check_models([c.qc_model])
+                user = fill(P["10"].text, {"[paste chunk number]": str(c.idx), TRACKER: c.prompt_tracker(),
+                                           "[Paste finished narration for this chunk]": body})
+                try:
+                    c.attempt("tracker_delta", c.qc_model, user,
+                              lambda t: tracker.validate_delta(tracker.extract_json(t)),
+                              max_tokens=config.QC_MAX_TOKENS)
+                except ParseError as e:
+                    return _malformed(c, "tracker", e)
+            sc = db.latest_pass(c.conn, c.chunk["id"], "scenes")
+            if not sc or sc["id"] < changed:
+                c.llm.check_models([c.qc_model])
+                user = fill(P["11"].text, {"[Paste finished narration for this chunk]": body})
+                try:
+                    c.attempt("scenes", c.qc_model, user,
+                              lambda t: tracker.validate_scenes(tracker.extract_json(t)),
+                              max_tokens=config.QC_MAX_TOKENS)
+                except ParseError as e:
+                    return _malformed(c, "scenes", e)
+            db.set_status(c.conn, c.chunk["id"], "tracker_pending")
+
+        elif status == "tracker_pending":
+            if not accept_tracker:
+                _tracker_gate(c)
+                return 0
+            accept_tracker = False
+            if not _accept_tracker(c):
+                return 1
+
+        elif status == "done":
             return 0
         else:
             raise RuntimeError(f"unknown chunk status {status!r}")

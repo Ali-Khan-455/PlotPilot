@@ -16,6 +16,12 @@ def connection_error():
     return anthropic.APIConnectionError(request=_REQ)
 
 
+AUTO_AUDIT = "5. **Texture gaps**\n- None\n\n6. **TTS hazards**\n- None"
+AUTO_PASS = "Step 4: verdict PASS"
+AUTO_DELTA = ('{"new_characters": [], "new_terms": [], "new_comparisons": [], "new_texture_motifs": [],'
+              ' "chunk_end_state": "It continues.", "nickname_collisions": []}')
+
+
 class _Stream:
     def __init__(self, message):
         self._message = message
@@ -44,16 +50,24 @@ class FakeClient:
 
     @staticmethod
     def _auto_qc(user):
-        """Clean answers for Prompts 6, 7 and 9 (echoing the narration for 9)."""
+        """Clean answers for Prompts 6, 7, 9 (echo), 10 (empty delta) and 11 (one scene)."""
         from plotpilot.prompts import load_prompts
         P = load_prompts()
         if user.startswith(P["6"].text.split("[Paste")[0]):
-            return "5. **Texture gaps**\n- None\n\n6. **TTS hazards**\n- None"
+            return AUTO_AUDIT
         if user.startswith(P["7"].text.split("[Paste")[0]):
-            return "Step 4: verdict PASS"
+            return AUTO_PASS
         prefix = P["9"].text.split("[Paste narration here]")[0]
         if user.startswith(prefix):
             return user[len(prefix):]
+        if user.startswith(P["10"].text.split("Chunk number:")[0]):
+            return AUTO_DELTA
+        prefix = P["11"].text.split("[Paste finished narration for this chunk]")[0]
+        if user.startswith(prefix):
+            import json
+            from plotpilot.parse import first_sentence
+            return json.dumps({"scenes": [{"first_sentence": first_sentence(user[len(prefix):]),
+                                           "description": "scene"}]})
         return None
 
     def _retrieve(self, model_id):
