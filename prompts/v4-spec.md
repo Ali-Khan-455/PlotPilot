@@ -511,6 +511,20 @@ The first scene starts at the first sentence of the narration. Copy "first_sente
 
 ---
 
+## PROMPT 12 — Module Classification (run on each chunk when --module is not given)
+
+**COPY EVERYTHING BELOW**
+
+Below are the four niche modules (A, B, C, D) and the opening of a batch of novel chapters. Decide which module fits this batch best. Output one capital letter, A, B, C, or D, and nothing else.
+
+[Paste the four modules]
+
+[Paste the opening of this chunk]
+
+**END OF PROMPT 12**
+
+---
+
 ## CHUNKING STRATEGY
 
 Process 5 chapters per chunk maximum (roughly 7–12k words of source text per pass), not the full 20–25 chapter batch at once. A single AI response covering an entire part would need to generate close to as much text as it read in — 25–30k words of narration in one shot — and quality reliably drifts over an output that long: repeated phrasing, forgotten continuity, degraded texture. Smaller chunks keep output length in a range the model sustains quality across, let you catch and fix problems before they compound, and let you review as you go.

@@ -13,6 +13,12 @@ PlotPilot converts a full novel (`.txt`) into a TTS-ready, first-person-MC YouTu
 - Artifacts on the local filesystem: `scripts/`, `trackers/`, `metadata/`, `logs/`.
 - LLM: Anthropic API. Models are set in one config place, overridable by CLI flag.
 
+## Models
+
+- Defaults in `plotpilot/config.py`: `GEN_MODEL = "claude-sonnet-5"` (drafts, repairs, texture, hook) and `QC_MODEL = "claude-haiku-4-5"` (classification, audits, fact-check, TTS, tracker, scenes).
+- These are current aliases confirmed against Anthropic's published model table, **not against the live API** (no key in the build environment). Bump a default when a newer alias ships.
+- The first real run verifies each model it uses with `models.retrieve` and exits with a clear message if an ID is unknown. Override with `--gen-model` / `--qc-model`.
+
 ## Commands
 
 ```bash
