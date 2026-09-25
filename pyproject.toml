@@ -1,0 +1,13 @@
+[project]
+name = "plotpilot"
+version = "0.1.0"
+description = "Convert novels into TTS-ready first-person YouTube narration scripts."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

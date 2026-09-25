@@ -1,0 +1,8 @@
+plotpilot.db
+scripts/
+trackers/
+metadata/
+logs/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
