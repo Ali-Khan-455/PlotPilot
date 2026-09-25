@@ -470,8 +470,8 @@ Output one JSON object and nothing else, with exactly these keys:
 
 ```
 {
-  "new_characters": [{"name": "Full Name", "stand_in": "casual stand-in used in the narration"}],
-  "new_terms": [{"term": "term", "meaning": "what it means"}],
+  "new_characters": [{"name": "Full Name", "standin": "casual stand-in used in the narration"}],
+  "new_terms": [{"term": "term", "meaning": "what it means", "chunk": 1}],
   "new_comparisons": ["comparison or reference used"],
   "new_texture_motifs": ["texture aside used, quoted as written"],
   "chunk_end_state": "1–2 sentences on where this chunk leaves off",
@@ -479,7 +479,9 @@ Output one JSON object and nothing else, with exactly these keys:
 }
 ```
 
-Use an empty list when a key has nothing new. Never include the MC in "new_characters". The MC is always "I."
+Use an empty list when a key has nothing new. "chunk" is the number of the chunk being processed, given below. Never include the MC in "new_characters". The MC is always "I."
+
+Chunk number: [paste chunk number]
 
 [Paste Continuity Tracker]
 
@@ -495,13 +497,13 @@ Use an empty list when a key has nothing new. Never include the MC in "new_chara
 
 You are marking scene changes in a finished narration script for later image sync. Read the narration below. Each time the scene changes (new location, new time, new major event), record it.
 
-Output one JSON array and nothing else. Each item is:
+Output one JSON object and nothing else, with exactly this shape:
 
 ```
-{"scene": "one-line description of what is happening", "first_sentence": "the first sentence of that scene, copied verbatim from the narration"}
+{"scenes": [{"first_sentence": "the first sentence of that scene, copied verbatim from the narration", "description": "one-line description of what is happening"}]}
 ```
 
-The first item starts at the first sentence of the narration. Copy "first_sentence" exactly, character for character. Do not add anything to the narration.
+The first scene starts at the first sentence of the narration. Copy "first_sentence" exactly, character for character. Do not add anything to the narration.
 
 [Paste finished narration for this chunk]
 

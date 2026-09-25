@@ -32,7 +32,7 @@ Run strictly in this order. Every stage persists to SQLite before the next start
 3. **Chunks 2–N draft.** Prompt 1 + Prompt 2 + Prompt 4 + Continuity Tracker + chapter text.
 4. **Per-chunk QC, in order:** Prompt 6 (self-audit) → Prompt 7 (fact-check; FAIL = gate) → Prompt 8 (texture repair, only if Prompt 6 reports texture gaps; then Prompt 7 again) → Prompt 9 (TTS normalization) → deterministic TTS check.
 5. **Tracker update.** Prompt 10 produces a JSON delta. Operator reviews it, then it merges into the tracker. Prompt 11 extracts scenes for this chunk.
-6. **Deferred hook.** After the last chunk: Prompt 5 runs once per novel. Splice the hook in place of chunk 1's margin.
+6. **Deferred hook.** After the last chunk: if the assembled script exceeds the model's context window, stop with a clear error (no summarization fallback). Otherwise Prompt 5 runs once per novel. Splice the hook in place of chunk 1's margin automatically, and verify the target sentence follows it.
 7. **Assemble** all chunks into one continuous script.
 8. **Emit metadata** `[mm:ss] SCENE: …`, with timestamps from word offsets at 150 words per minute.
 
@@ -41,7 +41,7 @@ MVP: the whole novel is one Part. The hook runs once, at the very end.
 ## Gates (the CLI stops and exits; the next run resumes)
 
 - **Module not chosen:** without `--module A|B|C|D`, the CLI classifies the chunk's first 2,000 words, prints the suggestion, and stops. It never selects a module silently.
-- **Fact-check FAIL:** print the flagged lines, MISSING/INVENTED, and the backing source excerpt. The operator edits the chunk file. Next run re-checks the edited text. Never auto-regenerate or auto-repair past a FAIL.
+- **Fact-check FAIL:** print the flagged lines, MISSING/INVENTED, and the backing source excerpt. The operator edits the chunk file, and the next run re-checks the edited text. Alternatively the operator passes `--accept-factcheck="<reason>"`: an empty reason is refused, and every use is logged to `logs/factcheck-overrides.log`. Never auto-regenerate or auto-repair past a FAIL.
 - **Tracker review:** write the pending delta to `trackers/`. Merge only on `--accept-tracker`.
 - **Read-aloud:** never blocks. Print the notice after each chunk: "Chunk complete. Recommended next step: read aloud at 2x for tone and texture drift before continuing."
 
@@ -51,6 +51,7 @@ MVP: the whole novel is one Part. The hook runs once, at the very end.
 - Keep every draft and every pass output (fair-use record). Never overwrite history in SQLite. Append.
 - Narration files contain only narration: no delimiters, no scene markers, no headers.
 - Log token usage for every LLM call to `logs/usage.csv`.
+- Load prompts by heading, never by line number. LLM JSON and delimiter output: validate, retry once, then fail clearly.
 
 ## How we work (Claude Code sessions)
 
