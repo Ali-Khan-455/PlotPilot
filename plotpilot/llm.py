@@ -10,6 +10,21 @@ USAGE_HEADER = ["timestamp", "novel", "chunk", "kind", "model", "stop_reason", "
                 "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
 
 
+CREDENTIALS_MSG = ("No Anthropic credentials found — set ANTHROPIC_API_KEY "
+                   "(or ANTHROPIC_AUTH_TOKEN, or run `ant auth login`).")
+
+
+def log_error(log_dir, msg: str):
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    with open(Path(log_dir) / "errors.log", "a") as f:
+        f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
+
+
+def _is_auth_error(e: Exception) -> bool:
+    # anthropic 1.x raises TypeError at request time when no credentials resolve.
+    return isinstance(e, TypeError) and "authentication" in str(e).lower()
+
+
 class LLMError(Exception):
     def __init__(self, message, text="", stop_reason=None):
         super().__init__(message)
@@ -40,14 +55,23 @@ class LLM:
             except anthropic.NotFoundError:
                 raise LLMError(f"Model ID '{model_id}' not found — check config.py or "
                                "--gen-model/--qc-model.") from None
+            except TypeError as e:
+                if _is_auth_error(e):
+                    raise LLMError(CREDENTIALS_MSG) from None
+                raise
             self._verified.add(model_id)
 
     def call(self, kind, model, user, *, system=None, max_tokens, slug, chunk_idx) -> str:
         kwargs = dict(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": user}])
         if system is not None:
             kwargs["system"] = system
-        with self.client.messages.stream(**kwargs) as stream:
-            msg = stream.get_final_message()
+        try:
+            with self.client.messages.stream(**kwargs) as stream:
+                msg = stream.get_final_message()
+        except TypeError as e:
+            if _is_auth_error(e):
+                raise LLMError(CREDENTIALS_MSG) from None
+            raise
         self._log_usage(slug, chunk_idx, kind, model, msg)
         text = "".join(b.text for b in msg.content if b.type == "text")
         if msg.stop_reason != "end_turn":

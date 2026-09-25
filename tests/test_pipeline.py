@@ -231,3 +231,31 @@ def test_unknown_model_fails(cwd, capsys):
 def test_usage_row_per_call(cwd):
     run("--module", "A", replies=[draft(margin="Who am I?"), repair("Plain.")])
     assert len((cwd / "logs" / "usage.csv").read_text().splitlines()) == 1 + 2
+
+
+# --- final-review fixes --------------------------------------------------------
+
+def test_api_error_during_repair_keeps_draft(cwd, capsys):
+    code, _ = run("--module", "A", replies=[draft(margin="Who am I?"), connection_error()])
+    assert code == 0 and status() == "drafted"
+    assert chunk_file(cwd).startswith("Who am I? ")
+    assert "margin repair failed" in capsys.readouterr().out
+    assert "Connection error" in (cwd / "logs" / "errors.log").read_text()
+
+
+def test_missing_credentials_is_a_clean_error(cwd, capsys):
+    auth = TypeError('"Could not resolve authentication method. Expected either api_key or auth_token"')
+    client = FakeClient([])
+    client.models.retrieve = lambda _id: (_ for _ in ()).throw(auth)
+    code = main(["--novel", "book.txt", "--module", "A"], client=client)
+    assert code == 1 and "No Anthropic credentials found" in capsys.readouterr().out
+    assert "credentials" in (cwd / "logs" / "errors.log").read_text()
+
+
+def test_mutating_runs_never_rewrite_earlier_rows(cwd):
+    run("--module", "A", replies=[draft()])
+    before = passes()
+    run("--repair-margin", replies=[repair("New margin.")])
+    run("--redraft", replies=[draft(margin="Third.")])
+    after = passes()
+    assert len(after) == len(before) + 2 and after[:len(before)] == before

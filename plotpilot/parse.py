@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 MARKERS = ["<<<MARGIN_START>>>", "<<<MARGIN_END>>>",
            "<<<TARGET_SENTENCE_START>>>", "<<<TARGET_SENTENCE_END>>>"]
-COUNT_LINE_RE = re.compile(r"^\s*margin is (\d+) sentences?\.?\s*$", re.I)
+COUNT_LINE_RE = re.compile(r"^[\s*_(]*margin is (\w+) sentences?[\s.*_)]*$", re.I)
+LEFTOVER_COUNT_RE = re.compile(r"\bmargin is\b[^\n]*\bsentences?\b", re.I)
+COUNT_WORDS = {w: n for n, w in enumerate(
+    ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"], 1)}
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 HOOKY_PHRASES = ["little did", "what happened next", "unbeknownst", "before long"]
 
@@ -52,17 +55,25 @@ def parse_draft(text: str) -> Draft:
     for line in text[positions[3] + len(MARKERS[3]):].split("\n"):
         m = COUNT_LINE_RE.match(line)
         if m:
-            if int(m[1]) > 9:
+            n = int(m[1]) if m[1].isdigit() else COUNT_WORDS.get(m[1].lower())
+            if n is None or n > 9:
                 raise ParseError(f"implausible margin length: {line.strip()!r}")
-            count = count if count is not None else int(m[1])
+            count = count if count is not None else n
         else:
             kept.append(line)
     raw_body = "\n".join(kept).strip()
+    if LEFTOVER_COUNT_RE.search(raw_body):
+        raise ParseError("margin-count text left in the narration body")
+    # Some outputs restate the margin before the target; drop that copy.
+    k = len(margin.split())
+    parts = raw_body.split(None, k)
+    if len(parts) >= k and _normalize(" ".join(parts[:k])) == _normalize(margin):
+        raw_body = parts[k] if len(parts) > k else ""
     if count is None:
         count = len(re.findall(r"[.!?](?=\s|$)", margin)) or 1
 
-    nbody, ntarget = _normalize(raw_body), _normalize(target)
-    if nbody.startswith(ntarget):
+    nbody, ntarget = _normalize(raw_body), _normalize(target).strip("\"'")
+    if nbody.lstrip("\"'").startswith(ntarget):
         body = raw_body
     elif ntarget in nbody:
         raise ParseError("target sentence appears mid-body, not right after the margin")

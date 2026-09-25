@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
+import anthropic
+
 from plotpilot import config, db
-from plotpilot.llm import LLMError
+from plotpilot.llm import LLMError, log_error
 from plotpilot.parse import ParseError, check_margin, parse_draft, parse_module, parse_repair
 from plotpilot.prompts import fill
 
@@ -91,7 +93,9 @@ class Chunk1:
         try:
             new = self._attempt("margin_repair", self.gen_model, user, parse_repair,
                                 max_tokens=config.REPAIR_MAX_TOKENS, note=reason)
-        except (ParseError, LLMError) as e:
+        except (ParseError, LLMError, anthropic.AnthropicError) as e:
+            if not isinstance(e, ParseError):
+                log_error(self.llm.log_dir, f"margin_repair {type(e).__name__}: {e}")
             print(f"WARNING: margin repair failed ({e}); keeping the draft margin. "
                   "Use --repair-margin to try again.")
             return

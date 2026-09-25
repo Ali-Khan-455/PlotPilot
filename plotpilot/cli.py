@@ -3,14 +3,13 @@
 import argparse
 import hashlib
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
 
 from plotpilot import config, db
 from plotpilot.ingest import estimate_tokens, parse_novel, plan_chunks
-from plotpilot.llm import LLM, LLMError
+from plotpilot.llm import LLM, LLMError, log_error
 from plotpilot.pipeline import run_chunk1
 from plotpilot.prompts import load_prompts
 
@@ -22,12 +21,6 @@ def fail(msg: str) -> int:
 
 def make_client():
     return anthropic.Anthropic(max_retries=3)
-
-
-def log_error(msg: str):
-    Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
-    with open(Path(config.LOG_DIR) / "errors.log", "a") as f:
-        f.write(f"{datetime.now(timezone.utc).isoformat()} {msg}\n")
 
 
 def main(argv=None, client=None) -> int:
@@ -75,7 +68,7 @@ def main(argv=None, client=None) -> int:
                               redraft=args.redraft, repair=args.repair_margin, gen_model=args.gen_model,
                               qc_model=args.qc_model, out_dir=args.out)
         except (LLMError, anthropic.AnthropicError) as e:
-            log_error(f"{type(e).__name__}: {e}")
+            log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}")
             return 1
     finally:

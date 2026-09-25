@@ -83,3 +83,27 @@ def test_parse_module():
     assert parse_module("B") == "B" and parse_module("B.") == "B" and parse_module(" c ") == "C"
     with pytest.raises(ParseError):
         parse_module("Module B")
+
+
+# --- final-review fixes --------------------------------------------------------
+
+@pytest.mark.parametrize("line", ["margin is one sentence.", "**margin is 1 sentence.**",
+                                  "Margin is two sentences", "(margin is 2 sentences)"])
+def test_count_line_variants_are_stripped(line):
+    d = parse_draft(out(after=f"{line}\n\n{TARGET} Rest."))
+    assert "margin is" not in d.body.lower() and d.body == TARGET + " Rest."
+
+
+def test_leftover_count_text_is_error():
+    with pytest.raises(ParseError):
+        parse_draft(out(after=f"{TARGET} Rest. The margin is twelve sentences long."))
+
+
+def test_body_restating_margin_is_accepted():
+    d = parse_draft(out(after=f"{MARGIN}\n{TARGET} Rest."))
+    assert d.body == TARGET + " Rest." and d.narration.count(MARGIN) == 1
+
+
+def test_quoted_target_matches_unquoted_body():
+    d = parse_draft(out(target=f'"{TARGET}"', after=f"margin is 1 sentence.\n\n{TARGET} Rest."))
+    assert d.body.count("Nobody") == 1
