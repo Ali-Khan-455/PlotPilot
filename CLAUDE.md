@@ -65,6 +65,7 @@ MVP: the whole novel is one Part. The hook runs once, at the very end.
 - **Implementing an approved phase:** `caveman` + `ponytail` + `executing-plans`. Implement the plan exactly. Make no silent architectural changes and add no scope.
 - **Before declaring a phase done:** `verification-before-completion`. Run the full `pytest` suite and `ruff check .`, then walk the plan's step list against the shipped code line by line.
 - **Debugging:** use `systematic-debugging` only when a test fails or a bug appears.
+- **Deferred minors:** each phase's final review appends its deferred Minor findings to `docs/deferred-minors.md`. Delete an entry when it is fixed.
 
 ## Spec
 
