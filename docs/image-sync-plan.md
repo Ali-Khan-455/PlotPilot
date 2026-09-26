@@ -334,7 +334,7 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
   - `--revise-beat` takes `04-15_2` to name the second occurrence.
   - Later, sub-second or per-scene offsets in PlotPilot could remove the collision at its source. That is out of scope now.
 
-## Conflicts to confirm before IS-1
+## Conflicts (C1–C3 confirmed by you; C4 open, blocks IS-2 only)
 
 - **C1 — Contract fields versus the "code enforces" design (Q1).** As literally specified, three contract fields would move work from code to the model. The proposal keeps each field but gives code the final say, like PlotPilot's tracker merge forcing a term's `chunk`.
   - **Stage 2 `prompt`:** the model returns the scene composition only. Code appends the `@Name` references and the locked suffix loaded from the spec. If the model wrote the whole prompt, the suffix would no longer be guaranteed word for word, which is v3's hardest rule.
@@ -347,7 +347,32 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
   - C → (a) Dark action;
   - D → (d) Comedy slice of life.
 
-  Please confirm, or say if A → (a) was intended.
+  **Confirmed.**
+
+**Resolutions (confirmed):**
+- **C1:** the contracts shed `prompt`, `manifest_rows`, `slot` and `cadence_warning`. Code:
+  - formats the `@Name` stack from `refs_used`;
+  - appends the suffix from `prompts/image-sync-v3.md`;
+  - builds the manifest from the stored prompts;
+  - assigns slots from Stage 1's `new_references` order at chunk 1, then locks them;
+  - computes cadence from timecode deltas.
+
+  The v3 prompt text is unchanged: any prose cadence warning is ignored.
+- **C2 (Amendment B):** `--bible-model` (default QC/Haiku) controls only the end-of-Stage-2 continuity-log call, which returns `{"continuity_log_entries": [...]}`. Stage 1's Bible additions come from the Stage 1 call itself (`--stage1-model`, default GEN/Sonnet).
+- **C3:** the mapping is A → (c), B → (b), C → (a), D → (d).
+- **Spec:** `prompts/image-sync-v3.md` is committed verbatim (4a39d1b), with the Q9 filename rule already in HOW TO USE step 5. The TOOL OUTPUT CONTRACTS appendix is appended (9964b56).
+
+**C4 — How the model learns the JSON shape (open; blocks IS-2, not IS-1).**
+- The appendix says the contracts "are not part of the prompt the model sees".
+- The v3 stage prompts tell the model to answer in markdown blocks: `#M-SS` / `Narration:` blocks, reference prompts in a fence, and Stage 2 prompts with the suffix appended.
+- If the model sees only the v3 text, it answers in that markdown, never in the JSON the code validates.
+
+**Proposed resolution:**
+- Amend the appendix so that its per-stage contract block **is** sent after that stage's prompt text, loaded by heading, with one fixed instruction line that also lives in the appendix.
+- The line would read: "Return only one JSON object matching the contract below. It replaces the output format described above; all other rules above still apply."
+- The v3 prompt text itself stays unchanged.
+
+**The alternative:** parse v3's markdown formats in code, which is fragile, and the Stage 2 prompts would still carry a model-written suffix, which C1 rules out.
 
 ## Open questions (answered — kept for reference)
 
