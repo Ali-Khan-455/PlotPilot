@@ -35,7 +35,7 @@ def main(argv=None, client=None) -> int:
     ap.add_argument("--out", default="./scripts", help="Output directory for narration files.")
     ap.add_argument("--module", type=str.upper, choices=["A", "B", "C", "D"],
                     help="Niche module for the chunk being drafted (Prompt 2).")
-    ap.add_argument("--redraft", action="store_true", help="Redraft chunk 1 even though it is drafted.")
+    ap.add_argument("--redraft", action="store_true", help="Redraft the current chunk even though it is drafted.")
     ap.add_argument("--repair-margin", action="store_true", help="Force Prompt 3-REPAIR on chunk 1's margin.")
     ap.add_argument("--gen-model", default=config.GEN_MODEL, help="Model for drafts and repairs.")
     ap.add_argument("--qc-model", default=config.QC_MODEL, help="Model for classification and QC passes.")
