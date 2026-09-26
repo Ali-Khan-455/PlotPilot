@@ -105,7 +105,7 @@ def test_d17_context_exceeded(cwd, capsys):
     msg = ("Part 1 assembled script is 38 words (~195,000 tokens). Prompt 5 requires the full script as "
            f"context. Exceeds {config.GEN_MODEL}'s context window. Split the novel into explicit Parts or "
            "reduce chunk count.")
-    assert msg in capsys.readouterr().out
+    assert msg in capsys.readouterr().err
     assert msg in (cwd / "logs" / "errors.log").read_text()
     code, client = run(replies=[hook_reply()], context=1_000_000, token_count=195_000)
     assert code == 0 and script(cwd) == SCRIPT
@@ -119,7 +119,7 @@ def test_hook_malformed_then_good(cwd):
 def test_hook_malformed_twice_then_rerun(cwd, capsys):
     capsys.readouterr()
     code, _ = all_done(["bad", "bad"])
-    assert code == 1 and "Hook output was malformed twice" in capsys.readouterr().out
+    assert code == 1 and "Hook output was malformed twice" in capsys.readouterr().err
     assert not (cwd / "scripts" / "book" / "script.txt").exists()
     code, client = run(replies=[hook_reply()])
     assert code == 0 and len(client.calls) == 2 and script(cwd) == SCRIPT
@@ -133,7 +133,7 @@ def test_hook_stopped(cwd):
 def test_hook_tts_malformed_twice_reruns_only_p9(cwd, capsys):
     hook3 = "I was 3 years old and already a farmer's son."
     code, _ = all_done([hook_reply(hook3), "junk", "junk"])
-    assert code == 1 and "Hook TTS normalization output was malformed twice" in capsys.readouterr().out
+    assert code == 1 and "Hook TTS normalization output was malformed twice" in capsys.readouterr().err
     fixed = hook3.replace("3", "three")
     code, client = run(replies=[fixed])
     assert code == 0 and len(client.calls) == 1 and client.counted == []
@@ -152,7 +152,7 @@ def test_splice_precheck_blocks_before_p5(cwd, capsys):
     capsys.readouterr()
     code, client = run(replies=[hook_reply()])
     assert code == 1 and client.calls == [] and client.counted == []
-    assert "hook splice check failed" in capsys.readouterr().out
+    assert "hook splice check failed" in capsys.readouterr().err
     assert "hook splice check failed" in (cwd / "logs" / "errors.log").read_text()
     assert not (cwd / "scripts" / "book" / "script.txt").exists()
 
@@ -223,7 +223,7 @@ def test_count_tokens_bad_request_is_d17(cwd, capsys, monkeypatch):
     monkeypatch.setattr(FakeClient, "_count_tokens", lambda self, **k: (_ for _ in ()).throw(err))
     capsys.readouterr()
     code, client = all_done()
-    out = capsys.readouterr().out
+    out = capsys.readouterr().err
     assert code == 1 and client.calls == []
     assert "Prompt 5 requires the full script as context" in out and "prompt is too long" in out
 
@@ -238,7 +238,7 @@ def test_other_count_tokens_400_is_surfaced(cwd, capsys, monkeypatch):
     capsys.readouterr()
     code, _ = all_done()
     out, errout = capsys.readouterr()
-    assert code == 1 and "context window" not in out and "invalid content block" in errout
+    assert code == 1 and "context window" not in out + errout and "invalid content block" in errout
 
 
 def test_context_word_in_other_400_is_surfaced(cwd, capsys, monkeypatch):
@@ -251,4 +251,4 @@ def test_context_word_in_other_400_is_surfaced(cwd, capsys, monkeypatch):
     capsys.readouterr()
     code, _ = all_done()
     out, errout = capsys.readouterr()
-    assert code == 1 and "context window" not in out and "context_management" in errout
+    assert code == 1 and "context window" not in out + errout and "context_management" in errout

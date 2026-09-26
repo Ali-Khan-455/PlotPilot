@@ -9,7 +9,7 @@ import anthropic
 
 from plotpilot import assemble, config, db, tracker
 from plotpilot.ingest import estimate_tokens
-from plotpilot.llm import log_error
+from plotpilot.llm import eprint, log_error
 from plotpilot.parse import ParseError, check_hook_tts, parse_hook
 from plotpilot.pipeline import ChunkRun, narration_state
 from plotpilot.prompts import fill
@@ -19,7 +19,7 @@ P5_NARRATION = "[Paste the full assembled Part 1 narration here]"
 
 
 def _fail(c, msg) -> int:
-    print(msg)
+    eprint(msg)
     log_error(c.llm.log_dir, msg)
     return 1
 

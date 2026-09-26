@@ -10,7 +10,7 @@ from pathlib import Path
 import anthropic
 
 from plotpilot import config, db, tracker
-from plotpilot.llm import LLMError, log_error
+from plotpilot.llm import LLMError, eprint, log_error
 from plotpilot.parse import (ParseError, check_rewrite, count_sentences, first_sentence, parse_audit, parse_draft,
                              parse_factcheck)
 from plotpilot.pipeline import TEXT_KINDS, narration_state
@@ -32,6 +32,16 @@ def _write_log(c, name, text):
     return folder / f"chunk-{c.chunk['idx']:02d}-{name}.md"
 
 
+def _logged(c, name, text, parsed):
+    """Write the operator's log file once the output parses, before its pass row is inserted. A failed
+    write never costs the pass row (the output is paid for); _sync_logs rewrites the file later."""
+    try:
+        _write_log(c, name, text)
+    except OSError as e:
+        print(f"WARNING: could not write the {name} log ({e}); the output is still stored.")
+    return parsed
+
+
 def _latest_after_draft(c, kind):
     draft = db.latest_pass(c.conn, c.chunk["id"], "draft")
     return db.latest_pass(c.conn, c.chunk["id"], kind, after_id=draft["id"])
@@ -43,7 +53,11 @@ def _sync_logs(c):
     for kind, name in (("audit", "audit"), ("factcheck", "factcheck")):
         row = _latest_after_draft(c, kind)
         if row:
-            paths[name] = _write_log(c, name, row["output_text"])
+            try:
+                paths[name] = _write_log(c, name, row["output_text"])
+            except OSError as e:
+                print(f"WARNING: could not write the {name} log ({e}).")
+                paths[name] = Path(config.LOG_DIR) / c.slug / f"chunk-{c.chunk['idx']:02d}-{name}.md"
     return paths
 
 
@@ -98,7 +112,7 @@ def _override(c, reason):
 
 def _malformed(c, what, e):
     msg = f"Chunk {c.idx} {what} output was {e}; raw outputs are stored. Re-run to try again."
-    print(msg)
+    eprint(msg)
     log_error(c.llm.log_dir, msg)
     return 1
 
@@ -160,12 +174,12 @@ def _accept_tracker(c) -> bool:
     d = db.latest_pass(c.conn, c.chunk["id"], "tracker_delta")
     bound = _pending_path(c, d["id"])
     if not bound.exists():
-        print(f"Pending file {bound} not found; re-run without --accept-tracker to regenerate it.")
+        eprint(f"Pending file {bound} not found; re-run without --accept-tracker to regenerate it.")
         return False
     try:
         delta = tracker.validate_delta(json.loads(bound.read_text(encoding="utf-8-sig")))
     except (ValueError, ParseError) as e:
-        print(f"Pending file {bound} is invalid: {e}")
+        eprint(f"Pending file {bound} is invalid: {e}")
         return False
     merged = tracker.merge(_current_tracker(c), delta, c.idx)
     if c.first:
@@ -218,22 +232,20 @@ def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
             c.llm.check_models([c.qc_model])
             user = fill(P["6"].text, {SOURCE: src, NARRATION: body, TRACKER: c.prompt_tracker()})
             try:
-                out = c.attempt("audit", c.qc_model, user, lambda t: (parse_audit(t), t),
-                                max_tokens=config.QC_MAX_TOKENS, status_for=lambda _: "audited")
+                c.attempt("audit", c.qc_model, user, lambda t: _logged(c, "audit", t, parse_audit(t)),
+                          max_tokens=config.QC_MAX_TOKENS, status_for=lambda _: "audited")
             except ParseError as e:
                 return _malformed(c, "audit", e)
-            _write_log(c, "audit", out[1])
 
         elif status == "audited":
             c.llm.check_models([c.qc_model])
             user = fill(P["7"].text, {SOURCE: src, NARRATION: body})
             try:
-                out = c.attempt("factcheck", c.qc_model, user, lambda t: (parse_factcheck(t), t),
-                                max_tokens=config.QC_MAX_TOKENS,
-                                status_for=lambda p: "checked" if p[0].passed else "factcheck_failed")
+                c.attempt("factcheck", c.qc_model, user, lambda t: _logged(c, "factcheck", t, parse_factcheck(t)),
+                          max_tokens=config.QC_MAX_TOKENS,
+                          status_for=lambda p: "checked" if p.passed else "factcheck_failed")
             except ParseError as e:
                 return _malformed(c, "fact-check", e)
-            _write_log(c, "factcheck", out[1])
 
         elif status == "factcheck_failed":
             if accept is None:

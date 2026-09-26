@@ -113,6 +113,13 @@ def latest_pass(conn, chunk_id, kind, after_id=None):
     ).fetchone()
 
 
+def latest_failed_pass(conn, chunk_id, kind, after_id=None):
+    """Newest PARSE_FAILED pass of a kind, optionally newer than after_id."""
+    return conn.execute(
+        "SELECT id, output_text FROM passes WHERE chunk_id = ? AND kind = ? AND verdict = 'PARSE_FAILED'"
+        " AND id > ? ORDER BY id DESC LIMIT 1", (chunk_id, kind, after_id or 0)).fetchone()
+
+
 def chunks(conn, novel_id):
     return conn.execute(
         "SELECT id, idx, label, status, source_text, chapter_start, chapter_end FROM chunks"

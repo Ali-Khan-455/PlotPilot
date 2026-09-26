@@ -305,3 +305,34 @@ def test_possessive_prose_is_not_a_heading():
     text = novel("Chapter 1", "Chapter 2") + ("\nChapter 2's ending was sad, I thought.\n"
                                               "\nChapter Seven's rules were strict.\n")
     assert headings(text) == ["Chapter 1", "Chapter 2"]
+
+
+# --- remaining deferred minors ------------------------------------------------------
+
+def test_labels_use_the_books_numbering():
+    text = novel("Prologue", "Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5", "Epilogue")
+    labels = [c.label for c in plan_chunks(parse_novel(text).chapters)]
+    assert labels == ["Prologue–Ch 4", "Ch 5–Epilogue"]
+
+
+def test_numbered_book_labels_unchanged():
+    text = novel("Chapter 10", "Chapter 11")
+    assert [c.label for c in plan_chunks(parse_novel(text).chapters)] == ["Ch 10–11"]
+
+
+def test_end_of_project_gutenberg_mid_book_is_prose():
+    text = novel("Chapter 1") + "\nEnd of Project Gutenberg's influence, he thought.\n\n" + novel("Chapter 2")
+    assert headings(text) == ["Chapter 1", "Chapter 2"]
+
+
+
+def test_restarting_numbers_fall_back_to_sequential_labels():
+    text = novel(*[f"Chapter {n}" for n in (1, 2, 3, 1, 2, 3, 4, 5)])
+    labels = [c.label for c in plan_chunks(parse_novel(text).chapters)]
+    assert labels == ["Ch 1–5", "Ch 6–8"]
+
+
+def test_heading_in_licence_after_end_line_is_dropped():
+    text = (novel("Chapter 1", "Chapter 2") + "\nEnd of Project Gutenberg's Etext of X\n\n"
+            "Epilogue\n\nlicence words here\n")
+    assert headings(text) == ["Chapter 1", "Chapter 2"]

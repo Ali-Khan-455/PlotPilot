@@ -1,6 +1,7 @@
 """Thin wrapper over the Anthropic client: model-ID check, streaming calls, usage logging."""
 
 import csv
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,11 @@ USAGE_HEADER = ["timestamp", "novel", "chunk", "kind", "model", "stop_reason", "
 
 CREDENTIALS_MSG = ("No Anthropic credentials found — set ANTHROPIC_API_KEY "
                    "(or ANTHROPIC_AUTH_TOKEN, or run `ant auth login`).")
+
+
+def eprint(msg: str):
+    """Errors go to stderr; gates, notes and progress stay on stdout."""
+    print(msg, file=sys.stderr)
 
 
 def log_error(log_dir, msg: str):
@@ -93,7 +99,10 @@ class LLM:
             with self.client.messages.stream(**kwargs) as stream:
                 msg = stream.get_final_message()
         except Exception as e:
-            self._log_row(slug, chunk_idx, kind, model, f"error:{type(e).__name__}", ["", "", "", ""])
+            try:
+                self._log_row(slug, chunk_idx, kind, model, f"error:{type(e).__name__}", ["", "", "", ""])
+            except OSError as log_e:  # never let a failed log write hide the API error
+                print(f"WARNING: could not write usage.csv ({log_e}).")
             if _is_auth_error(e):
                 raise LLMError(CREDENTIALS_MSG) from None
             raise
