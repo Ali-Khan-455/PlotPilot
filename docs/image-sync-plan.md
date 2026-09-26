@@ -2,7 +2,7 @@
 
 ## Context
 
-PlotPilot turns a novel into a narration script (`scripts/<slug>/script.txt`, per-chunk files) plus scene metadata (`metadata/<slug>.txt`, `[mm:ss] SCENE: …` at 150 wpm). The **Image-Sync Prompt Engine v3** is a markdown prompt doc that an operator pastes into Claude chunk by chunk. It turns PlotPilot's output into image prompts for Google Flow and keeps a hand-pasted **Visual Bible** for continuity. The work has three stages:
+PlotPilot turns a novel into a narration script (`<out>/<slug>/script.txt`, per-chunk files) plus scene metadata (`metadata/<slug>.txt`, `[mm:ss] SCENE: …` at 150 wpm). The **Image-Sync Prompt Engine v3** is a markdown prompt doc that an operator pastes into Claude chunk by chunk. It turns PlotPilot's output into image prompts for Google Flow and keeps a hand-pasted **Visual Bible** for continuity. The work has three stages:
 
 - **Stage 0:** beats.
 - **Stage 1:** character, location and object references, then a reference approval gate.
@@ -14,7 +14,7 @@ This plan turns that doc into a tool in the same style as PlotPilot:
 - prompts loaded from a spec file by heading;
 - gates that stop the run and a next run that resumes;
 - TDD against a fake client;
-- phases, each reviewed before implementation.
+- phases, each reviewed with `plan-reviewer` before implementation.
 
 **Fixed (not revisited here):**
 - beat-based segmentation;
@@ -22,6 +22,10 @@ This plan turns that doc into a tool in the same style as PlotPilot:
 - continuity-locked state;
 - portability to SDXL+LoRA;
 - no summarization fallback for context limits.
+
+**Blocked on you before IS-1 can start:**
+- the v3 spec text must be committed to the repo (it isn't there yet);
+- Q0 (the second spec file) and Q1 (output contracts) need your approval.
 
 ## Decisions on the seven questions
 
@@ -36,13 +40,13 @@ Several v3 rules are mechanical, so code guarantees them instead of trusting the
 
 | v3 rule | Enforced by |
 |---|---|
-| Never invent a timestamp. Split beats share a timestamp with a/b suffixes. Chronological order. | code: validates every beat timecode against the chunk's metadata scenes |
+| Never invent a timestamp. Split beats share a timestamp with a/b suffixes. Chronological order. | code: validates every beat against the chunk's scene list |
 | Source tag required on recovered detail | code: parse check, retry once |
-| Cadence warning (outside 3–20 s for more than 3 beats in a row) | code: computed from the timecodes, so it's never missed |
+| Cadence warning (outside 3–20 s for more than 3 beats in a row) | code: computed from the timecodes |
 | Slot policy (5 characters / 14 objects, locked, fallback) | code: the Bible merge assigns slots and the LLM never does |
 | Unique CamelCase `#Tag`s | code |
 | Batch pre-check (every `@Name` approved) | code: runs before any Stage 2 call, so no partial batch |
-| Locked style suffix, word for word | code: appends it, and the LLM never writes it |
+| Locked style suffix, word for word | code: appends it **as text loaded from the spec by heading**, never as a code literal |
 | Shot cadence (no more than 3 of the same shot in a row, a wide shot every 5–7 beats, 9:16 avoids wide shots) | code: QA check and one retry of that batch; warns after that |
 | `@Name` used only for approved references present in the beat, never stacked | code: QA check |
 | Manifest CSV, `beat_<M-SS>.png` names | code: generated from stored prompts |
@@ -55,64 +59,92 @@ Several v3 rules are mechanical, so code guarantees them instead of trusting the
 
 ### 2. Where it lives → **same repo, separate package**
 
-Add a new top-level package, `imagesync/`, with its own CLI (`imagesync.py`) and its own database (`imagesync.db`). Details:
-- **It imports only PlotPilot's stable pure parts:**
-  - `plotpilot.llm` (the client wrapper, model check and usage log);
-  - `plotpilot.prompts.fill` and a generalized heading loader;
-  - `plotpilot.assemble` (to recompute per-chunk scene timestamps exactly as PlotPilot did);
-  - `tests/fakes.py`.
-- **It reads `plotpilot.db` read-only** (`sqlite3.connect("file:plotpilot.db?mode=ro", uri=True)`) through one `imagesync/source.py` module. PlotPilot never imports imagesync, so there is one job per package and one owner per database.
-- **Why not a sibling repo or a fork:** both would duplicate `llm.py`, `prompts.py`, the fakes and the CI. The scene-timestamp logic would also drift from `assemble.py`.
-- **Why not inside `plotpilot/`:** it would mix two pipelines with different gates and state in one package, and blur CLAUDE.md's "one job per module" rule.
-- **Prompt text** lives in `prompts/image-sync-v3.md`. It is the v3 spec verbatim plus the tool output contracts (see open question Q1). Code never paraphrases it.
+Add a new top-level package, `imagesync/`, with its own CLI (`imagesync.py`) and its own database (`imagesync.db`).
+
+**What imagesync uses from PlotPilot:**
+- `plotpilot.llm` (the client wrapper, model check, `count_tokens`, `context_limit` and the usage log);
+- `plotpilot.prompts.fill` and a generalized loader (see IS-1);
+- `tests/fakes.py`;
+- **one new read-only PlotPilot function, `plotpilot.final.derive_outputs(conn, novel_id)`.** It returns `(hook, bodies, scenes_per_chunk, script, metadata_lines)`, exactly as `run_final` computes them.
+
+**How `derive_outputs` works:**
+- Today `run_final` builds these inputs inline:
+  - `narration_state` for the bodies;
+  - the hook, from the `hook` pass followed by the newer `hook_tts` pass;
+  - the target, from the tracker;
+  - the scenes, from each chunk's latest ok `scenes` pass.
+- IS-1 extracts that derivation into `derive_outputs`, and `run_final` calls it too. Both tools therefore share one source of the script and timestamps, with no reimplementation to drift apart.
+- `scene_lines` is called **once, novel-wide**, and its output is split by each chunk's scene count. Calling it per chunk would stamp every chunk's first scene `[00:00]` and reset the cursor.
+
+**How imagesync reads PlotPilot:**
+- `plotpilot.db` is opened read-only (`file:…?mode=ro`, `row_factory=Row`) through one `imagesync/source.py` module.
+- A missing database gives a clear error.
+- PlotPilot never imports imagesync, and each database has one owner.
+
+**Alternatives considered:**
+- **Sibling repo or fork:** both would duplicate `llm.py`, `prompts.py`, the fakes and CI, and the derivation would drift.
+- **Inside `plotpilot/`:** it would mix two pipelines with different gates and state in one package.
+
+**Prompt text:**
+- It lives in `prompts/image-sync-v3.md`: the v3 spec verbatim, plus the tool output contracts (Q1).
+- That includes the locked style suffix, the sub-style descriptors and the colour treatments. All of them are loaded by heading, and none is a code constant.
+- CLAUDE.md currently names `prompts/v4-spec.md` as the only prompt source. A second spec file therefore needs **your approval (Q0)**, and IS-1 amends CLAUDE.md and `docs/architecture-audit.md` (which lists image sync as deferred).
 
 ### 3. Visual Bible storage → **JSON in SQLite (source of truth) + a markdown mirror**
 
 This follows the `tracker_versions` precedent (R21).
 
-- **Storage:** a `bible_versions(id, novel, chunk_idx, stage, json, delta, accepted_at)` table. Each accepted update inserts a new row; rows are never updated.
-- **Merge:** deterministic, in a pure module `imagesync/bible.py`. It never deletes. It appends a superseded state as a new continuity entry. It assigns slots in order of first appearance and marks overflow as `fallback`. It rejects a duplicate `#Tag`.
-- **Mirror:** `bibles/<slug>.md`, rendered in **exactly** v3's `=== VISUAL BIBLE ===` block format and regenerated on every run. It is read-only, like `trackers/<slug>.md`.
-- **What the prompts get:** a rendering from the same function, never a hand-edited file.
-- **Review surface:** operator edits go through a bound pending JSON file, as with the tracker gate.
+- **Storage:** `bible_versions(id, novel_id, chunk_idx, stage, json, delta, accepted_at)` with **`UNIQUE(novel_id, chunk_idx, stage)`**, where `stage` is one of `style_lock`, `refs` or `continuity`. Revisions are not new versions: they are appended to the revision log inside the next version.
+- **Atomic write:** `db.add_bible_version(..., new_status=)` inserts the version row, a pass row and the chunk status in **one transaction**, as `add_tracker_version` does.
+- **Merge:** deterministic, in a pure module `imagesync/bible.py`. It never deletes. It appends a superseded state as a new continuity entry. It assigns slots in order of first appearance and marks overflow as `fallback`. It rejects a duplicate `#Tag` and keeps both the original and transliterated names.
+- **Mirror:** `bibles/<slug>.md`, rendered in exactly v3's `=== VISUAL BIBLE ===` block layout and regenerated on every run. It is read-only. The layout mirrors the spec's headings, like R21's tracker render; the field labels come from the spec block.
+- **Review surface:** a bound pending JSON file, as with the tracker gate.
 
 ### 4. Flow integration → **manual paste, tracked by gates**
 
-The plan assumes no Flow API (see Q3). The tool writes paste-ready files and records the operator's decisions:
+The plan assumes no Flow API (Q3).
+
+**What the tool writes:**
 - **Reference prompts:** `images/<slug>/chunk-NN/refs.txt`.
 - **Batches:** `images/<slug>/chunk-NN/batch-K.txt`.
-- **Approval:** `--approve-refs` records a `refs_approved` pass. After that, the Bible marks each reference `reference generated: yes`.
-- **Regeneration:** `--regenerate "#Name: reason"` re-runs Stage 1 for that one reference, with the reason, and the gate is held again.
-- **Optional file check:** if the operator saves reference images to `images/<slug>/refs/<Tag>.png`, the tool reports missing ones before approval, as a warning only.
-- **Portability:** everything Flow-specific (`#Name` / `@Name` syntax, the 5/14 slot limits) sits in one `imagesync/target.py`. Adding SDXL+LoRA later means swapping that module, as v3's portability section intends.
+- **Manifest:** `manifest.csv`.
+- **All derived:** these files are rebuilt from the database on every run, so a crash between an insert and a file write heals itself (R22 precedent).
+
+**How it records the operator's decisions:**
+- **Approval:** `--approve-refs` writes the `refs` Bible version, marking each reference `reference generated: yes`, together with the status, atomically.
+- **Regeneration:** `--regenerate "#Name: reason"` re-runs Stage 1 for that one reference with the reason and returns to `refs_pending`. It's allowed until the chunk's first Stage 2 batch is stored; after that, use `--revise-beat`.
+- **Optional file check:** with images saved to `images/<slug>/refs/<Tag>.png`, the tool warns about missing ones before approval.
+
+**Portability:** everything Flow-specific (`#Name` / `@Name` syntax, the 5/14 limits) sits in one `imagesync/target.py`. Swapping that module is the SDXL+LoRA path.
 
 ### 5. Batch orchestration → **automatic batches, operator-controlled gates**
 
 The chat-era "next" only existed because of chat output limits. The tool loops through batches of about 30 beats by itself:
 - each batch is one Stage 2 call, persisted as soon as it's done, so a crash resumes at the next batch;
-- all of a chunk's batches are written in one run;
+- the batch size used is stored on the chunk, so changing the config can't reshuffle batches on resume;
 - the operator pastes `batch-1.txt`, `batch-2.txt` and so on at their own pace.
 
 Operator control stays where a decision is made:
-- **Style lock gate** (chunk 1 only): `--sub-style a|b|c|d --aspect 16:9|9:16|1:1|4:5`. The tool suggests a sub-style from PlotPilot's dominant module and never picks one silently, like the module gate.
+- **Style lock gate** (chunk 1 only): `--sub-style a|b|c|d --aspect 16:9|9:16|1:1|4:5`. The tool suggests a sub-style from PlotPilot's dominant module and never picks one silently (Q7).
 - **Reference approval gate** (per chunk, when new references exist).
-- **Bible review gate** (end of a chunk): `--accept-bible`. The continuity-log delta is reviewed before the next chunk builds on it, as with PlotPilot's D4.
-- **Beat revision** (any time): `--revise-beat 04-15 "new description"` changes only that beat, logs it in the revision log, and re-emits only that beat's Stage 2 prompt.
+- **Bible review gate** (end of a chunk): `--accept-bible` (Q8).
+- **Beat revision:** `--revise-beat 04-15 "new description"` is stored as an appended pass that is folded over the beats (R20-style), never as an update.
 
-### 6. Context window → **bounded inputs by construction + a hard pre-check, no summarization**
+### 6. Context window → **selected inputs + a hard pre-check, no summarization**
 
-The inputs are bounded as follows:
-- **Stage 0:** one PlotPilot chunk (at most 12k words of source), its narration, and its scene lines. The chunk size limits this.
-- **Stage 1:** the chunk's beat list plus a **tag index** of the Bible: every entry's name, tag, slot and locked descriptor. It excludes the continuity and revision logs, because Stage 1 only needs to know what already exists, not its history.
-- **Stage 2, one batch:**
-  - that batch's beats, plus the last 3 beats of the previous batch for shot-cadence context;
-  - the style lock;
-  - the full entries for **the references and elements named in those beats**, each with its current state (the newest continuity entry per element);
-  - for a `CONTINUES` beat, the previous chunk's last beat and shot.
+**Stage 0:** one PlotPilot chunk's chapters, its narration and its scene list. This is normally at most 12k words, but a single chapter over 12k words is its own chunk and can be larger. So only the hard pre-check truly bounds it.
 
-These are **deterministic selections of verbatim records**, not summaries. No text is rewritten or condensed, and whatever is sent is exact. Before every call, `llm.count_tokens` is compared with the model's `max_input_tokens`, as D17 did. If a call would exceed the limit, the run stops with a clear error and no fallback. Over the limit is only reachable if a single chunk's beats or Bible entries are enormous, which PlotPilot's chunk cap prevents in practice.
+**Stage 1:** the chunk's beats plus a **tag index** of the Bible: every entry's name, tag, slot and locked descriptor. It excludes the continuity and revision logs.
 
-This deviates from v3's "paste the (whole) Visual Bible into every stage" (see Q2).
+**Stage 2, one batch:**
+- that batch's beats, plus the last 3 beats of the previous batch for shot-cadence context;
+- the style lock;
+- the full entries for the elements named in those beats, each with its newest continuity state;
+- for a `CONTINUES` beat, the previous chunk's last beat and shot.
+
+These are **deterministic selections of verbatim records**, not summaries. No text is rewritten.
+
+**Hard pre-check before every call:** `count_tokens + max_tokens` is compared with the model's `max_input_tokens`, as D17 does. A 400 from `count_tokens` for an oversize request is handled as in `final.py`. Over the limit is a clear error, with no fallback. The selection deviates from v3's "paste the whole Bible" (Q2).
 
 ### 7. Validation → **yes, with stdlib validators in the `tracker.validate_delta` style**
 
@@ -120,50 +152,75 @@ This deviates from v3's "paste the (whole) Visual Bible into every stage" (see Q
   - every model output (beats, reference proposals and Bible delta, batch scenes);
   - every accepted Bible version;
   - every hand-edited pending file.
-- **How:** exact keys, exact types and enumerated values (shot types, sub-styles, aspects, states, genres). A failure means retry once, then fail clearly (D18).
-- **Why not Pydantic:** it would add a direct runtime dependency, against CLAUDE.md's "anthropic only". It's installed transitively, but relying on that is fragile (see Q4). The Bible schema is small and flat enough for hand-written validators, as `tracker.py` shows.
+- **How:** exact keys, exact types and enumerated values. A failure means retry once, then fail clearly (D18).
+- **Why not Pydantic:** it's installed transitively through `anthropic`, but not declared (Q4).
 
 ## Design
 
 **Data flow per chunk:**
 
 ```
-plotpilot.db (read-only)  →  source.py: chunk narration, chapters, per-chunk scene timestamps
-                                        (recomputed with plotpilot.assemble), module, tracker
+plotpilot.db (read-only) → plotpilot.final.derive_outputs → source.py: per-chunk narration,
+        chapters, scene list (novel-wide scene_lines, split by chunk), module, tracker
       ↓
-[style lock gate, chunk 1]  →  Stage 0 (beats JSON) → validate → beats stored
+[style lock gate, chunk 1] → Stage 0 (beats JSON) → validate → beats pass
       ↓
-Stage 1 (new refs + Bible delta JSON) → slot assignment in code → refs.txt → [approval gate]
+Stage 1 (new refs + Bible delta JSON) → slots in code → refs.txt → [approval gate]
       ↓
-batch pre-check (code) → Stage 2 per batch (scene JSON) → code composes prompt + style suffix → QA → batch-K.txt
+batch pre-check (code) → Stage 2 per batch (scene JSON) → code composes prompt + spec suffix → QA → batch-K.txt
       ↓
-manifest.csv (code) → Bible continuity delta → [Bible review gate] → next chunk
+manifest.csv (code) → continuity delta → [Bible review gate] → next chunk
 ```
 
-**Chunk states:**
+**When a novel is ready.** The novel must be finished in PlotPilot, judged from the database alone, never from `script.txt`, whose path depends on `--out`:
+- every chunk has status `done`;
+- chunk 1 has an ok `hook_tts` pass newer than its latest ok `hook` pass;
+- `assemble.splice_check` passes on the recomputed script.
 
-```
-ready → beats → refs_pending → refs_approved → batching → bible_pending → done
-```
+**Binding to the PlotPilot data.** When an imagesync novel is created, it stores PlotPilot's `source_sha256` and a sha256 of the recomputed script and metadata lines. Every run recomputes both and refuses on a mismatch with a clear message. This covers a re-planned slug or a rebuilt `plotpilot.db`, so imagesync never works from stale narration.
 
-Every transition is one atomic pass-plus-status write, as with `add_pass(new_status=)`.
+**Beat identity.**
+- Beats are keyed internally by `(chunk_idx, scene_index, suffix)`.
+- `beat_<M-SS>.png` and `--revise-beat M-SS` rely on timecodes being unique. `source.py` therefore **refuses duplicate scene timestamps** (R22's unfound-scene fallback can produce them), with an error naming both scenes. This keeps the v3 filename convention exact.
 
-**Scene timestamps per chunk:** PlotPilot's metadata file is novel-wide. The tool recomputes each chunk's scene lines by calling `plotpilot.assemble.scene_lines` on PlotPilot's stored data. That gives exactly the same `[mm:ss]` values, plus the chunk boundary, so there's no need to parse ranges out of the text file.
+**Chunk states and transitions.** Each transition is one atomic write: a pass, a status, and a Bible version where noted.
+
+| From | Event | To | Writes |
+|---|---|---|---|
+| `ready` | Stage 0 ok | `beats` | beats pass |
+| `beats` | Stage 1 ok with new references | `refs_pending` | refs pass |
+| `beats` | Stage 1 ok with no new references | `refs_approved` | refs pass + `refs` Bible version |
+| `refs_pending` | `--approve-refs` | `refs_approved` | `refs` Bible version |
+| `refs_pending` / `refs_approved` (no batch stored) | `--regenerate "#Name: r"` | `refs_pending` | refs pass |
+| `refs_approved` | first batch stored | `batching` | batch pass |
+| `batching` | all batches stored | `bible_pending` | continuity delta pass |
+| `bible_pending` | `--accept-bible` | `done` | `continuity` Bible version |
+| any state after `beats` | `--revise-beat` with no new `@Name` | unchanged | revision pass; affected prompt re-emitted if already batched |
+| any state after `beats` | `--revise-beat` introducing a new element | `beats` | revision pass. Stage 1 re-runs for the new element only, so the chunk re-enters the reference gate rather than dead-ending at the batch pre-check. |
 
 **Stage 2 composition** is split between the model and code:
 - **The model returns** `{timecode, shot_type, scene, refs[], genre_override|null}`.
-- **Code builds the final prompt:** `"{shot}, {scene}, {@refs}, {style suffix}"`. The style suffix is `LOCKED_SUFFIX` filled with the sub-style descriptor, the colour treatment and the aspect from the Bible.
+- **Code builds the final prompt:** `"{shot}, {scene}, {@refs}, {suffix}"`. The suffix is the spec's locked-suffix section, with the sub-style descriptor and colour treatment (also loaded from the spec) and the aspect from the Bible.
 - **QA:** code rejects a `@ref` that isn't approved, isn't in the beat, or is stacked.
 
 ## Phases
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **IS-1 Foundation** | The `imagesync/` package and `imagesync.py` CLI (`--novel <slug>`). `source.py` reads `plotpilot.db` read-only and refuses unless PlotPilot has finished the novel (every chunk done, `script.txt` exists). `prompts/image-sync-v3.md` holds the spec verbatim, and the loader is generalized by passing a heading regex. The `imagesync.db` schema covers novels, chunks, passes and `bible_versions`. The style lock gate stores the first Bible version. There are no LLM calls. | A manifest of chunks with scene counts prints. The style lock gate works. Scene timestamps equal PlotPilot's `metadata/<slug>.txt`, checked in a test. |
-| **IS-2 Stage 0** | The beats call, beat JSON validation (the timestamp subset, a/b suffixes, order, source tags, `CONTINUES` only on beat 1 and only when the previous chunk's final continuity entry is an open scene), the cadence warning, `--revise-beat` before Stage 2, and the error, usage and retry conventions. | Chunk 1 beats are stored and a rerun makes no calls. Every hard rule has a failing-then-passing test. |
-| **IS-3 Bible + Stage 1** | The `bible.py` schema, merge and render (the exact v3 format), slot assignment and fallback, unique tags with transliteration kept, the Stage 1 call, `refs.txt`, the approval gate, `--regenerate`, and the mirror. | Two-chunk test: chunk 2 doesn't re-create chunk 1's references, overflow gets `fallback`, and the render matches the v3 block exactly. |
-| **IS-4 Stage 2** | The batch pre-check, per-batch calls, composition in code, QA (shot cadence, aspect, refs, red-X and text rules checked only as far as they can be checked), a retry per batch, `batch-K.txt`, `manifest.csv`, the Bible continuity delta, the review gate, and `CONTINUES` framing across chunks. | A two-chunk run ends at `done`. The style suffix is byte-exact on every prompt. A crash between batches resumes at the next batch. |
-| **IS-5 Revisions + image check** | `--revise-beat` after Stage 2 re-emits one prompt, with a revision log entry. `--check-images` compares `images/<slug>/chunk-NN/beat_*.png` against the manifest and reports missing or extra files. | The revision touches only that beat. The image report is correct in tests. |
+| **IS-1 Foundation** | See the IS-1 detail below the table. | A manifest of chunks prints. The style lock gate works. The recomputed metadata lines equal PlotPilot's file byte for byte. `run_final` is unchanged in behaviour (its tests pass). |
+| **IS-2 Stage 0** | The beats call, beat validation (the scene-list subset, a/b suffixes, order, source tags, `CONTINUES` only on beat 1 and only when the previous chunk's final continuity entry is an open scene), the cadence warning, and `--revise-beat` before Stage 2. | Chunk 1 beats are stored and a rerun makes no calls. Every hard rule has a failing-then-passing test. |
+| **IS-3 Bible + Stage 1** | `bible.py` (schema, merge, render in exact v3 layout), slots and fallback, unique tags with transliteration, `add_bible_version`, the Stage 1 call, `refs.txt`, the approval gate, `--regenerate`, and the mirror. | Two-chunk test: chunk 2 doesn't re-create chunk 1's references, overflow gets `fallback`, the render matches the v3 block, and a replayed accept is refused by `UNIQUE`. |
+| **IS-4 Stage 2** | The batch pre-check, per-batch calls, composition in code with the spec-loaded suffix, QA (shot cadence, aspect, refs; red-X and text rules only as far as they can be checked), a retry per batch, batch files, `manifest.csv`, the continuity delta, the review gate, and `CONTINUES` framing. | A two-chunk run ends at `done`. The suffix is byte-equal to the spec section on every prompt. A crash between batches resumes at the next one. |
+| **IS-5 Revisions + image check** | `--revise-beat` after Stage 2 (re-emit one prompt, or re-enter the reference gate for a new element). `--check-images` compares `beat_*.png` against the manifest. | Every transition in the table has a test. The image report is correct. |
+
+**IS-1 in detail:**
+- **Docs:** amend CLAUDE.md and `docs/architecture-audit.md` (Q0).
+- **Prompt loader:** generalize `load_prompts(path, heading_re, key=…)`. Sections without COPY/END markers must **fail closed** for the required keys, not be skipped silently.
+- **PlotPilot extraction:** move `plotpilot.final.derive_outputs` out of `run_final`.
+- **`source.py`:** read-only access, the readiness check, the sha binding, and the duplicate-timestamp refusal.
+- **`imagesync.db` schema:** includes `add_bible_version` and `UNIQUE`.
+- **CLI and style lock gate:** add the CLI (`--novel path.txt`, with the slug derived as PlotPilot derives it) and the style lock gate.
+- **Tests:** shared test helpers, and a conftest client guard for `imagesync.cli`.
 
 Each phase follows PlotPilot's workflow: a plan in plan mode, `plan-reviewer`, approval, TDD, a final review, and minor findings into `docs/deferred-minors.md`.
 
@@ -171,66 +228,80 @@ Each phase follows PlotPilot's workflow: a plan in plan mode, `plan-reviewer`, a
 
 ```
 imagesync.py                 shim → imagesync.cli
-imagesync/cli.py             argparse, gates, stdout/stderr split as PlotPilot
-imagesync/source.py          read-only access to plotpilot.db + assemble reuse
-imagesync/db.py              imagesync.db schema, append-only helpers
-imagesync/beats.py           Stage 0 contract: validate, cadence (pure)
+imagesync/cli.py             argparse (--novel path.txt, slug as PlotPilot), gates, stdout/stderr as PlotPilot
+imagesync/source.py          read-only plotpilot.db access, readiness, sha binding, per-chunk split
+imagesync/db.py              imagesync.db schema, add_pass / add_bible_version (atomic), UNIQUE constraints
+imagesync/beats.py           Stage 0 contract: validate, cadence, revision fold (pure)
 imagesync/bible.py           Visual Bible schema, merge, slots, render (pure)
-imagesync/target.py          Flow specifics: #/@ syntax, slot limits, suffix (pure)
-imagesync/compose.py         Stage 2 prompt composition + QA checks + manifest (pure)
+imagesync/target.py          Flow specifics: #/@ syntax, slot limits (pure; no prompt text)
+imagesync/compose.py         Stage 2 composition + QA + manifest (pure; suffix passed in from the spec)
 imagesync/pipeline.py        stage order, gates, resume
-imagesync/config.py          models, batch size (30), paths
-prompts/image-sync-v3.md     the spec (source of truth for prompt text)
-plotpilot/prompts.py         load_prompts(path, heading_re=…) generalization (backward compatible)
+imagesync/config.py          models, batch size, paths
+prompts/image-sync-v3.md     the spec, incl. suffix/sub-style/colour sections and output contracts
+plotpilot/final.py           + derive_outputs(conn, novel_id); run_final calls it (no behaviour change)
+plotpilot/prompts.py         load_prompts(path, heading_re, key) — backward compatible, fail closed
+tests/helpers.py             shared cwd/run/all_done/hook_reply (moved from test_final.py)
+tests/conftest.py            + guard imagesync.cli.make_client
 tests/test_imagesync_*.py    one file per pure module + pipeline tests with FakeClient
-docs/image-sync-audit.md     decisions and rulings (IS-D1…), like architecture-audit.md
+CLAUDE.md, docs/architecture-audit.md   amended for the second spec and the imagesync package (Q0)
+docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
 ```
 
-## TDD steps (IS-1, as the first review target)
+## TDD steps (IS-1, the first review target)
 
-1. `plotpilot.prompts.load_prompts(path, heading_re)`:
-   - PlotPilot's existing prompt tests pass unchanged;
-   - a fixture spec with `## STAGE 0 — …` headings loads by heading.
-2. `source.py`, using a PlotPilot database built by the existing test helpers (`all_done`):
-   - it returns every chunk's narration, chapter text and scene lines;
-   - it refuses an unfinished novel with a clear error;
-   - it never writes: a test compares a checksum of the database file before and after.
-3. The per-chunk scene timestamps equal the lines in the `metadata/<slug>.txt` that PlotPilot wrote, in a byte-level comparison.
-4. The `imagesync.db` schema and `add_pass(new_status=)` are atomic.
-5. The style lock gate:
-   - without flags, it prints the suggested sub-style (from the dominant module) and exits 0;
-   - with flags, it stores Bible version 1;
+1. **`derive_outputs`:**
+   - all existing `test_final.py` tests pass unchanged after `run_final` is refactored onto it;
+   - a new test shows `derive_outputs(...)[4]` (the metadata lines) equals the `metadata/<slug>.txt` written by `run_final`, byte for byte.
+2. **`load_prompts(path, heading_re, key)`:**
+   - PlotPilot's prompt tests pass unchanged;
+   - a fixture v3 spec loads every required key (Stage 0/1/2, contracts, suffix, sub-styles, colours);
+   - a required section missing its markers raises, instead of being skipped.
+3. **`source.py`**, on a finished PlotPilot database built through shared helpers:
+   - it returns per-chunk narration, chapters and scene lists;
+   - it refuses an unfinished novel, a missing database, and duplicate scene timestamps;
+   - it never writes (a checksum of the file before and after);
+   - after PlotPilot's database is rebuilt, it refuses on the sha mismatch.
+4. **Schema and atomicity:** `add_pass(new_status=)` and `add_bible_version(new_status=)` are atomic, and `UNIQUE(novel_id, chunk_idx, stage)` rejects a replayed version.
+5. **Style lock gate:**
+   - without flags, it prints the suggestion and exits 0;
+   - with flags, it stores the `style_lock` version;
    - invalid values are refused;
    - a rerun is idempotent.
-6. Verify: `pytest`, `ruff check .` (with the pinned rules), a fresh final review, and the minor findings into `docs/deferred-minors.md`.
+6. **Verify:**
+   - `pytest` and `ruff check .` (pinned rules);
+   - a fresh final review;
+   - minor findings into `docs/deferred-minors.md`.
 
 ## Out of scope
 
 - Flow or any image API calls.
 - Automatic image download.
 - The SDXL+LoRA backend, beyond keeping `target.py` swappable.
-- Mode B (TurboScribe input) until a real need exists (see Q5).
+- Mode B (TurboScribe input) until a real need exists (Q5).
 - A video editor.
 - A web UI.
 - Summarization of any kind.
 - Prompt caching.
+- Packaging with `pip install .` (the project installs dependencies only, as the README and CI do).
 
 ## Verification (whole project)
 
 - The full suite runs against `FakeClient` with no network.
 - A two-chunk end-to-end fixture goes from a finished PlotPilot database to `done`.
-- A byte-exact style suffix is checked on every prompt.
-- The Bible render equals the v3 block format.
-- A crash or resume test covers every gate.
+- The suffix is byte-equal to the spec section on every prompt.
+- The Bible render matches the v3 layout.
+- There is a crash or resume test for every gate and transition.
 - One real run on the same public-domain novel PlotPilot is first run on. It is operator-side, because there's no API key or Flow access here.
 
 ## Open questions (can't be decided from the repo or the spec)
 
-- **Q1 — Output contracts.** v3's stages emit free-text blocks. For code to validate them, Stages 0, 1 and 2 need JSON output contracts. The proposal is to append a "TOOL OUTPUT CONTRACTS" section to `prompts/image-sync-v3.md` and change nothing else. That is a spec edit, which needs your approval. The alternative is to parse v3's free-text formats, which is fragile, especially Stage 2 scene text.
-- **Q2 — Filtered Bible in Stage 2.** v3 says to paste the whole Bible into every stage. The plan sends Stage 2 only the entries relevant to the batch, as verbatim records. Is that acceptable, or must every call carry the full Bible, with the hard token check as the only guard?
-- **Q3 — Flow access.** Is there any API or automation for Flow you have, or intend to use? The plan assumes manual paste.
-- **Q4 — Pydantic.** It's installed transitively through `anthropic`. Is a direct dependency acceptable, or do we keep hand-written validators (the recommendation)?
+- **Q0 — Second spec file.** CLAUDE.md names `prompts/v4-spec.md` as the only prompt source. Do you approve `prompts/image-sync-v3.md` as a second one? CLAUDE.md and the architecture audit would be amended in IS-1. Can you also commit the v3 text, or paste it for me to add verbatim? IS-1 is blocked until then.
+- **Q1 — Output contracts.** v3's stages emit free-text blocks. For code to validate them, Stages 0, 1 and 2 need JSON output contracts. The proposal is to append a "TOOL OUTPUT CONTRACTS" section to the v3 spec and change nothing else. That is a spec edit, which needs your approval. The alternative is to parse v3's free text, which is fragile.
+- **Q2 — Selected Bible entries in Stage 2.** v3 says to paste the whole Bible into every stage. The plan sends each Stage 2 batch only the entries for the elements it names, as verbatim records. Is that acceptable, or must every call carry the full Bible, with the hard token check as the only guard?
+- **Q3 — Flow access.** Do you have, or plan to use, any Flow API or automation? The plan assumes manual paste.
+- **Q4 — Pydantic.** It's installed transitively through `anthropic`. Is a direct dependency acceptable, or do we keep hand-written validators (recommended)?
 - **Q5 — Mode B (TurboScribe).** Is it needed in the first release? It's skipped for now, because the PlotPilot input is authoritative.
 - **Q6 — Models.** Stage 0 and Stage 2 need judgment, so the plan uses GEN (Sonnet). Could Stage 1 or the Bible delta use QC (Haiku)? This only affects cost.
 - **Q7 — Sub-style choice.** Is a suggestion from PlotPilot's dominant module, which you confirm, the right approach? Or do you always pick the sub-style yourself?
 - **Q8 — Bible review gate.** Should the end-of-chunk `--accept-bible` gate be mandatory, as with the tracker gate? Or can the continuity delta merge automatically, since its entries come from beats you already reviewed at the reference gate?
+- **Q9 — Duplicate scene timestamps.** The plan refuses them. The alternative is to disambiguate filenames (e.g. `beat_04-15.png` then `beat_04-15_2.png`), which departs from v3's convention. Which do you prefer?
