@@ -146,10 +146,19 @@ def parse_novel(text: str) -> Parsed:
         first_head = next((i for i, ln in enumerate(lines)
                            if (i == 0 or not lines[i - 1].strip()) and is_heading_line(ln)), len(lines))
         start = next((i + 1 for i, ln in enumerate(lines[:first_head]) if SMALL_PRINT_RE.match(ln)), 0)
-    last_head = max((i for i in range(start, len(lines))
-                     if (i == start or not lines[i - 1].strip()) and is_heading_line(lines[i])), default=-1)
-    end = next((i for i in range(start, len(lines))
-                if GUT_END_RE.match(lines[i]) or (i > last_head and GUT_END_LINE_RE.match(lines[i]))), len(lines))
+    hard_end = next((i for i in range(start, len(lines)) if GUT_END_RE.match(lines[i])), len(lines))
+    head_lines = [i for i in range(start, hard_end)
+                  if (i == start or not lines[i - 1].strip()) and is_heading_line(lines[i])]
+
+    def real_chapter_after(i):
+        """A heading after line i whose body is a real chapter (a heading-shaped licence line isn't)."""
+        after = [h for h in head_lines if h > i] + [hard_end]
+        return any(count_words("\n".join(lines[a + 1:b])) >= config.MIN_CHAPTER_WORDS
+                   for a, b in zip(after, after[1:]))
+
+    # "End of Project Gutenberg…" ends the text unless a real chapter follows it (then it's prose).
+    end = next((i for i in range(start, hard_end)
+                if GUT_END_LINE_RE.match(lines[i]) and not real_chapter_after(i)), hard_end)
     trailing_words = count_words("\n".join(lines[end:]))
 
     heads = [
@@ -227,6 +236,11 @@ def _label(first: Chapter, last: Chapter) -> str:
 
 def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
     chunks: list[Chunk] = []
+    # The book's own numbers only when they identify chapters: strictly increasing (not an omnibus or
+    # a Part Two that restarts at Chapter 1). Otherwise, sequential positions as before.
+    nums = [n for n in (heading_number(c.heading) for c in chapters) if n is not None]
+    book = all(a < b for a, b in zip(nums, nums[1:]))
+    _lab = _label if book else (lambda a, b: f"Ch {a.idx}" if a is b or a.idx == b.idx else f"Ch {a.idx}–{b.idx}")
     group: list[Chapter] = []
 
     def add(label, start, end, text, words):
@@ -235,7 +249,7 @@ def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
     def flush():
         if group:
             a, b = group[0].idx, group[-1].idx
-            add(_label(group[0], group[-1]), a, b,
+            add(_lab(group[0], group[-1]), a, b,
                 "\n\n".join(f"{c.heading}\n\n{c.body}" for c in group),
                 sum(c.words for c in group))
             group.clear()
@@ -254,7 +268,7 @@ def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
                 text = "\n\n* * *\n\n".join(piece)
                 if k == 1:
                     text = f"{ch.heading}\n\n{text}"
-                label = _label(ch, ch) if len(pieces) == 1 else f"{_label(ch, ch)} (part {k}/{len(pieces)})"
+                label = _lab(ch, ch) if len(pieces) == 1 else f"{_lab(ch, ch)} (part {k}/{len(pieces)})"
                 add(label, ch.idx, ch.idx, text, sum(map(count_words, piece)))
             continue
         if len(group) == config.MAX_CHAPTERS or sum(c.words for c in group) + ch.words > config.MAX_WORDS:

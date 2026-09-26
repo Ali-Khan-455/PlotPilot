@@ -102,7 +102,7 @@ class LLM:
             try:
                 self._log_row(slug, chunk_idx, kind, model, f"error:{type(e).__name__}", ["", "", "", ""])
             except OSError as log_e:  # never let a failed log write hide the API error
-                eprint(f"WARNING: could not write usage.csv ({log_e}).")
+                print(f"WARNING: could not write usage.csv ({log_e}).")
             if _is_auth_error(e):
                 raise LLMError(CREDENTIALS_MSG) from None
             raise

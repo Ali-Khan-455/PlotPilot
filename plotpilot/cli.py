@@ -95,8 +95,12 @@ def main(argv=None, client=None) -> int:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
-    except sqlite3.OperationalError as e:  # e.g. a read-only database or directory
-        return fail(f"Cannot write the database {config.DB_PATH}: {e}.")
+    except sqlite3.OperationalError as e:
+        # Only an unwritable or locked database is an operator problem; anything else is a bug, so re-raise.
+        if not re.search(r"readonly|read-only|locked|unable to open|disk I/O", str(e), re.I):
+            raise
+        log_error(config.LOG_DIR, f"OperationalError: {e}")
+        return fail(f"Cannot write the database {config.DB_PATH}: {e}. Check it is writable and not in use.")
     finally:
         conn.close()
 

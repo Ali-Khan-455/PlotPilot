@@ -323,3 +323,16 @@ def test_numbered_book_labels_unchanged():
 def test_end_of_project_gutenberg_mid_book_is_prose():
     text = novel("Chapter 1") + "\nEnd of Project Gutenberg's influence, he thought.\n\n" + novel("Chapter 2")
     assert headings(text) == ["Chapter 1", "Chapter 2"]
+
+
+
+def test_restarting_numbers_fall_back_to_sequential_labels():
+    text = novel(*[f"Chapter {n}" for n in (1, 2, 3, 1, 2, 3, 4, 5)])
+    labels = [c.label for c in plan_chunks(parse_novel(text).chapters)]
+    assert labels == ["Ch 1–5", "Ch 6–8"]
+
+
+def test_heading_in_licence_after_end_line_is_dropped():
+    text = (novel("Chapter 1", "Chapter 2") + "\nEnd of Project Gutenberg's Etext of X\n\n"
+            "Epilogue\n\nlicence words here\n")
+    assert headings(text) == ["Chapter 1", "Chapter 2"]

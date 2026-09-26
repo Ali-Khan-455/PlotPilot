@@ -109,4 +109,4 @@ def test_usage_log_failure_does_not_mask_the_api_error(tmp_path, capsys):
     with pytest.raises(Exception) as e:
         llm.call("draft", "m", "u", max_tokens=5, slug="n", chunk_idx=1)
     assert "Connection" in type(e.value).__name__
-    assert "could not write usage.csv" in capsys.readouterr().err
+    assert "could not write usage.csv" in capsys.readouterr().out

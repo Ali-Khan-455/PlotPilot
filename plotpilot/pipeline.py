@@ -75,14 +75,18 @@ def _apply(state, kind, output, first):
     return replace(state, body=output.strip())  # texture, tts
 
 
-def _looks_like_body(margin: str, state) -> bool:
-    """The new first paragraph is (an edit of) body narration rather than of the margin: the margin
-    paragraph was probably deleted."""
-    new, first_para = _normalize(margin), _normalize(re.split(r"\n\s*\n", state.body.strip(), 1)[0])
-    if new in _normalize(state.body):
-        return True
-    like_body = difflib.SequenceMatcher(None, new, first_para).ratio()
-    return like_body >= 0.6 and like_body > difflib.SequenceMatcher(None, new, _normalize(state.margin)).ratio()
+def _first_para(text: str) -> str:
+    return _normalize(re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0])
+
+
+def _looks_like_body(margin: str, body: str, state) -> bool:
+    """The margin paragraph was probably deleted: the new first paragraph is (an edit of) the old body's
+    first paragraph, and the new body no longer starts with it. A margin rewrite that happens to
+    resemble the body keeps the body's first paragraph in place, so it is accepted."""
+    def like(a, b):
+        return difflib.SequenceMatcher(None, a, b).ratio()
+    old_first = _first_para(state.body)
+    return like(_normalize(margin), old_first) >= 0.6 and like(_first_para(body), old_first) < 0.6
 
 
 def _is_first(conn, chunk_id) -> bool:
@@ -257,7 +261,7 @@ class ChunkRun:
             margin, body = split_file(raw, self.first)
         except FileFormatError as e:
             raise FileFormatError(str(e).replace("the chunk file", self.path.name)) from None
-        if self.first and margin != state.margin and _looks_like_body(margin, state):
+        if self.first and margin != state.margin and _looks_like_body(margin, body, state):
             raise FileFormatError(
                 f"ERROR: the first paragraph of {self.path.name} is narration from the body; the margin "
                 "paragraph seems to be deleted. Restore it (the hook replaces it later).")
@@ -342,9 +346,8 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
                 return 1
             # Keep the operator's text in history (not ok, so it never enters the narration fold), once.
             raw = c.path.read_text(encoding="utf-8")
-            last = c.conn.execute(
-                "SELECT output_text FROM passes WHERE chunk_id = ? AND kind = 'operator_edit'"
-                " AND verdict = 'PARSE_FAILED' ORDER BY id DESC LIMIT 1", (c.chunk["id"],)).fetchone()
+            last = db.latest_failed_pass(c.conn, c.chunk["id"], "operator_edit",
+                                         after_id=db.latest_pass(c.conn, c.chunk["id"], "draft")["id"])
             if not last or last["output_text"] != raw:
                 db.add_pass(c.conn, c.novel_id, c.chunk["id"], "operator_edit", None, "", raw,
                             verdict="PARSE_FAILED", note="malformed file replaced by --redraft")

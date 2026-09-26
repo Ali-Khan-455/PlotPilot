@@ -465,3 +465,22 @@ def test_repeated_failing_redraft_stores_the_file_once(cwd):
     run("--redraft", replies=["bad", "bad"])
     run("--redraft", replies=["bad", "bad"])
     assert [r for r in rows() if r[0] == "operator_edit"].__len__() == 1
+
+
+# --- review of the remaining-minors fix -------------------------------------------------
+
+def test_failed_log_write_keeps_the_audit_row(cwd, capsys):
+    (cwd / "logs").mkdir()
+    (cwd / "logs" / "book").write_text("a file, not a directory")
+    run("--module", "A", replies=[draft(), "garbage", "garbage"])  # stops before any audit is stored
+    code, _ = run(replies=[AUDIT_CLEAN, PASS, BODY])
+    assert "audit" in kinds() and "could not write" in capsys.readouterr().out
+
+
+def test_legit_margin_rewrite_similar_to_body_is_accepted(cwd):
+    second = "A second paragraph follows here."
+    run("--module", "A", replies=[draft_paras(), AUDIT_CLEAN, PASS, BODY + "\n\n" + second])
+    new_margin = "Nobody expected much from me when the guard came and I ran for the hills."
+    chunk_path(cwd).write_text(f"{new_margin}\n\n{BODY}\n\n{second}\n")
+    code, _ = run(auto_qc=True)
+    assert code == 0 and kinds().count("operator_edit") == 1

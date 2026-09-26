@@ -33,8 +33,12 @@ def _write_log(c, name, text):
 
 
 def _logged(c, name, text, parsed):
-    """Write the operator's log file once the output parses, before its pass row is inserted."""
-    _write_log(c, name, text)
+    """Write the operator's log file once the output parses, before its pass row is inserted. A failed
+    write never costs the pass row (the output is paid for); _sync_logs rewrites the file later."""
+    try:
+        _write_log(c, name, text)
+    except OSError as e:
+        print(f"WARNING: could not write the {name} log ({e}); the output is still stored.")
     return parsed
 
 
@@ -49,7 +53,11 @@ def _sync_logs(c):
     for kind, name in (("audit", "audit"), ("factcheck", "factcheck")):
         row = _latest_after_draft(c, kind)
         if row:
-            paths[name] = _write_log(c, name, row["output_text"])
+            try:
+                paths[name] = _write_log(c, name, row["output_text"])
+            except OSError as e:
+                print(f"WARNING: could not write the {name} log ({e}).")
+                paths[name] = Path(config.LOG_DIR) / c.slug / f"chunk-{c.chunk['idx']:02d}-{name}.md"
     return paths
 
 

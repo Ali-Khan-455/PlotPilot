@@ -193,3 +193,14 @@ def test_fresh_parse_warnings_suppressed_for_changed_parser(cwd, capsys, monkeyp
     main(["--novel", "n.txt"], client=FakeClient([]))
     out = capsys.readouterr().out
     assert "the stored plan is used" in out and "WARNING: dropped" not in out and "fewer than" not in out
+
+
+
+def test_other_sqlite_errors_are_not_swallowed(cwd, monkeypatch):
+    import plotpilot.cli as cli
+    write_novel(cwd / "n.txt")
+    monkeypatch.setattr(cli, "run_novel", lambda *a, **k: (_ for _ in ()).throw(
+        sqlite3.OperationalError("no such column: foo")))
+    import pytest
+    with pytest.raises(sqlite3.OperationalError):
+        main(["--novel", "n.txt"], client=FakeClient([]))
