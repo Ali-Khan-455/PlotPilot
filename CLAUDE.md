@@ -62,7 +62,7 @@ MVP: the whole novel is one Part. The hook runs once, at the very end.
 
 ## How we work (Claude Code sessions)
 
-- **Planning a phase:** `caveman` + `ponytail`. Use `EnterPlanMode`. Run the `plan-reviewer` subagent on the draft plan and fix its findings before `ExitPlanMode`. Use `brainstorming` only if the phase's scope is not already clear from this file and `docs/architecture-audit.md`.
+- **Planning a phase:** `caveman` + `ponytail`. Always start with `brainstorming` first, even when the phase's scope looks clear from this file and `docs/architecture-audit.md` — it can surface things planning alone would miss. Then use `EnterPlanMode`. Run the `plan-reviewer` subagent on the draft plan and fix its findings before `ExitPlanMode`. Always stop for the user's explicit approval before implementing, even after `plan-reviewer` clears the plan.
 - **Implementing an approved phase:** `caveman` + `ponytail` + `executing-plans`. Implement the plan exactly. Make no silent architectural changes and add no scope.
 - **Before declaring a phase done:** `verification-before-completion`. Run the full `pytest` suite and `ruff check .`, then walk the plan's step list against the shipped code line by line.
 - **Debugging:** use `systematic-debugging` only when a test fails or a bug appears.
