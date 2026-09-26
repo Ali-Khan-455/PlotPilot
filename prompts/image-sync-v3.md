@@ -419,3 +419,68 @@ digital manhwa/webtoon illustration style, [sub-style descriptor], clean line ar
 ## CORE PRODUCTION PRINCIPLE
 
 The finished sequence should feel like one illustrator worked the whole video — the same characters living in the same world, established states respected scene to scene, every image earning its place by communicating its beat. Chase continuity and clarity, not novelty.
+
+---
+
+## TOOL OUTPUT CONTRACTS (appendix)
+
+These contracts define the JSON shapes the Image-Sync tool expects from each stage. They are not part of the prompt the model sees; they are the code-facing validation schema. The prompt text above is authoritative for behavior; this appendix is authoritative for data shape.
+
+**Stage 0 output:**
+```
+{
+  "beats": [
+    {
+      "timecode": "04-15",              // or "04-15a" for split scenes
+      "narration": "string",
+      "detail": [{"clause": "string", "chapter": "Ch 3"}],
+      "continues": "04-08" | null
+    }
+  ]
+}
+```
+Note: `cadence_warning` is not a contract field. The tool computes cadence from timecode deltas independently.
+
+**Stage 1 output:**
+```
+{
+  "new_references": [
+    {
+      "type": "character" | "location" | "object",
+      "tag": "VillageElder",
+      "descriptor": "string"
+    }
+  ],
+  "bible_update": {
+    "characters": [...],
+    "locations": [...],
+    "objects": [...]
+  }
+}
+```
+Note: `slot` is not a contract field. The tool assigns slots from the `new_references` array order at chunk 1, then locks them.
+
+**Stage 2 batch output:**
+```
+{
+  "prompts": [
+    {
+      "timecode": "04-15",
+      "scene": "string",            // scene composition only
+      "shot_type": "medium-wide",
+      "refs_used": ["VillageElder", "Sword"],
+      "genre_override": "Dark action" | null
+    }
+  ]
+}
+```
+Note: the final `prompt` string, the `@Name` stack, the locked style suffix, and `manifest_rows` are not contract fields. The tool appends the suffix from this spec file, formats `@Name` tags from `refs_used`, and builds the manifest from the stored prompts.
+
+**Bible update (end-of-Stage-2 continuity call):**
+```
+{
+  "continuity_log_entries": [
+    {"beat": "04-15", "element": "Sword", "from": "sheathed", "to": "drawn", "reason": "string"}
+  ]
+}
+```
