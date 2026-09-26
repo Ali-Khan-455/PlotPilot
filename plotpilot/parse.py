@@ -308,5 +308,8 @@ def parse_hook(text: str, target: str) -> str:
 
 
 def check_hook_tts(new: str, hook: str, target: str) -> str:
-    """Prompt 9 on the hook: a rewrite check (Prompt 9's ratio) plus the hook checks."""
-    return _check_hook(check_rewrite(new, hook, min_ratio=config.TTS_MIN_RATIO), target)
+    """Prompt 9 on the hook: a rewrite check plus the hook checks. Prompt 9's ratio, but a short hook may
+    always lose one word (a homograph rewrite, Prompt 9 item 3)."""
+    n = len(hook.split())
+    ratio = min(config.TTS_MIN_RATIO, (n - 1) / n) if n > 1 else config.TTS_MIN_RATIO
+    return _check_hook(check_rewrite(new, hook, min_ratio=ratio), target)

@@ -87,3 +87,8 @@ def test_timestamps_never_go_backwards():
 def test_description_is_one_line():
     lines, _ = scene_lines("Alpha.", [0], [[("Alpha.", "two\nlines  here")]])
     assert lines == ["[00:00] SCENE: two lines here"]
+
+
+def test_first_scene_found_mid_body_warns():
+    lines, warns = scene_lines("Start here. Later line.", [0], [[("Later line.", "a")]])
+    assert lines == ["[00:00] SCENE: a"] and len(warns) == 1 and "not at the start" in warns[0]

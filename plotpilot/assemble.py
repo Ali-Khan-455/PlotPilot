@@ -68,6 +68,9 @@ def scene_lines(script: str, starts, scenes_per_chunk, wpm: int = config.WORDS_P
                 stamp = prev
             else:
                 cursor = hit + 1
+                if not lines and hit != starts[0]:
+                    warnings.append(f'the first scene "{sentence[:60]}…" is not at the start of the narration; '
+                                    "it is stamped [00:00] anyway.")
                 stamp = "[00:00]" if not lines else _stamp(hit, wpm)
             prev = stamp
             lines.append(f"{stamp} SCENE: {' '.join(description.split())}")

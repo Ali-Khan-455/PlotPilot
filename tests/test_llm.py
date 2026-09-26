@@ -90,3 +90,12 @@ def test_failed_stream_still_logs_a_usage_row(tmp_path):
         llm.call("draft", "m", "u", max_tokens=5, slug="n", chunk_idx=1)
     rows = list(csv.reader(open(tmp_path / "usage.csv")))
     assert rows[1][3:6] == ["draft", "m", "error:APIConnectionError"] and rows[1][6:] == ["", "", "", ""]
+
+
+def test_context_limit_zero_is_not_missing_and_override_fallback_warns(tmp_path, capsys):
+    client = FakeClient(context=0)
+    assert LLM(client, tmp_path).context_limit("m") == 0
+    client = FakeClient()
+    client.models.retrieve = lambda _id: SimpleNamespace(id=_id)
+    LLM(client, tmp_path).context_limit("claude-other")
+    assert "context window of claude-other is unknown" in capsys.readouterr().out

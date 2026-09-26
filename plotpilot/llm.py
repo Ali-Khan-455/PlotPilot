@@ -68,7 +68,13 @@ class LLM:
     def context_limit(self, model_id) -> int:
         """The model's input limit from models.retrieve; config.GEN_CONTEXT_TOKENS if it isn't given."""
         self.check_models([model_id])
-        return self._limits.get(model_id) or config.GEN_CONTEXT_TOKENS
+        limit = self._limits.get(model_id)
+        if limit is None:
+            if model_id != config.GEN_MODEL:
+                print(f"Note: the context window of {model_id} is unknown; assuming "
+                      f"{config.GEN_CONTEXT_TOKENS:,} tokens ({config.GEN_MODEL}'s).")
+            return config.GEN_CONTEXT_TOKENS
+        return limit
 
     def count_tokens(self, model, user, system) -> int:
         try:

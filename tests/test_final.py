@@ -200,3 +200,29 @@ def test_history_is_append_only(cwd):
     run()
     after = q("SELECT * FROM passes ORDER BY id")
     assert after[:len(before)] == before and len(after) == len(before) + 3
+
+
+# --- deferred minors (Phase 5) --------------------------------------------------
+
+def test_edited_script_is_regenerated_with_a_warning(cwd, capsys):
+    all_done([hook_reply()])
+    (cwd / "scripts" / "book" / "script.txt").write_text("hand fix\n")
+    (cwd / "metadata" / "book.txt").write_text("[00:00] SCENE: hand fix\n")
+    capsys.readouterr()
+    run()
+    out = capsys.readouterr().out
+    assert "script.txt differed from the stored narration" in out and "book.txt differed from the stored scenes" in out
+    assert script(cwd) == SCRIPT
+
+
+def test_count_tokens_bad_request_is_d17(cwd, capsys, monkeypatch):
+    import anthropic
+    import httpx2
+    req = httpx2.Request("POST", "https://api.anthropic.com")
+    err = anthropic.BadRequestError("prompt is too long", response=httpx2.Response(400, request=req), body=None)
+    monkeypatch.setattr(FakeClient, "_count_tokens", lambda self, **k: (_ for _ in ()).throw(err))
+    capsys.readouterr()
+    code, client = all_done()
+    out = capsys.readouterr().out
+    assert code == 1 and client.calls == []
+    assert "Prompt 5 requires the full script as context" in out and "prompt is too long" in out

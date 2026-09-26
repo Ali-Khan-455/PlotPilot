@@ -4,7 +4,10 @@ the splice check (D20), the assembled script, and the scene metadata file (R5)."
 import json
 from pathlib import Path
 
+import anthropic
+
 from plotpilot import assemble, config, db, tracker
+from plotpilot.ingest import estimate_tokens
 from plotpilot.llm import log_error
 from plotpilot.parse import ParseError, check_hook_tts, parse_hook
 from plotpilot.pipeline import ChunkRun, narration_state
@@ -42,12 +45,17 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
         system = f"{prompts['1'].text}\n\n{prompts[f'MODULE {module}'].text}"
         pre_hook = assemble.join(states[0].margin, bodies)
         user = fill(prompts["5"].text, {P5_TARGET: target, P5_NARRATION: pre_hook})
-        tokens = llm.count_tokens(gen_model, user, system)
-        if tokens + config.HOOK_MAX_TOKENS > llm.context_limit(gen_model):  # D17
+        limit, reason = llm.context_limit(gen_model), ""
+        try:
+            tokens = llm.count_tokens(gen_model, user, system)
+        except anthropic.BadRequestError as e:  # the counting endpoint may refuse an oversize request itself
+            tokens, reason = estimate_tokens(len(user.split()) + len(system.split())), f" (API: {e})"
+            limit = -1
+        if tokens + config.HOOK_MAX_TOKENS > limit:  # D17
             return _fail(c, f"Part 1 assembled script is {len(pre_hook.split()):,} words (~{tokens:,} tokens). "
                             "Prompt 5 requires the full script as context. Exceeds "
                             f"{gen_model}'s context window. Split the novel into explicit Parts or reduce "
-                            "chunk count.")
+                            f"chunk count.{reason}")
         try:
             c.attempt("hook", gen_model, user, lambda t: parse_hook(t, target), system=system,
                       max_tokens=config.HOOK_MAX_TOKENS, module=module)
@@ -76,6 +84,9 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
         return _fail(c, f"ERROR: hook splice check failed: {e}")
     script_path = Path(out_dir) / slug / "script.txt"
     script_path.parent.mkdir(parents=True, exist_ok=True)
+    if script_path.exists() and script_path.read_text(encoding="utf-8") != script:
+        print(f"WARNING: {script_path.name} differed from the stored narration and was regenerated. The script "
+              "is rebuilt from the database on every run; edits to it are not kept.")
     script_path.write_text(script, encoding="utf-8")
 
     scenes = []
@@ -87,7 +98,10 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
         print(f"WARNING: {w}")  # printed only: the file is rebuilt every run (R22)
     meta_path = Path(config.METADATA_DIR) / f"{slug}.txt"
     meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    meta = "".join(f"{line}\n" for line in lines)
+    if meta_path.exists() and meta_path.read_text(encoding="utf-8") != meta:
+        print(f"WARNING: {meta_path} differed from the stored scenes and was regenerated; edits to it are not kept.")
+    meta_path.write_text(meta, encoding="utf-8")
 
     words = len(script.split())
     minutes = max(1, round(words / config.WORDS_PER_MINUTE))

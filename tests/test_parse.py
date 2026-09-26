@@ -392,3 +392,10 @@ def test_factcheck_step_headers_are_not_flags():
     text = ("**Step 2: PRESENT / MISSING check**\n- The guard reveals the map: MISSING\n"
             "## Step 3 — INVENTED lines\n- \"I flew.\" INVENTED\nFinal verdict: FAIL")
     assert parse_factcheck(text).flags == ["- The guard reveals the map: MISSING", '- "I flew." INVENTED']
+
+
+def test_hook_tts_may_drop_one_word():
+    old = "I was the kid who read every book in the whole village library."
+    assert check_hook_tts("I was the kid who read each book in the village library.", old, HT)
+    with pytest.raises(ParseError):
+        check_hook_tts("I was the kid who read books in the village library.", old, HT)
