@@ -75,8 +75,10 @@ def _style_gate(conn, novel_id, src, args, spec) -> int:
     module = dominant_module(src)
     if not args.sub_style:
         letter = config.MODULE_TO_SUBSTYLE[module]
+        # The confirm command carries a non-default --aspect, so running it verbatim locks what was shown.
+        confirm = f"--sub-style {letter}" + (f" --aspect {args.aspect}" if args.aspect else "")
         print(f"Suggested sub-style: ({letter}) {_name(spec, letter)} (from dominant module {module}). "
-              f"Confirm with --sub-style {letter}, or pick another. "
+              f"Confirm with {confirm}, or pick another. "
               f"Aspect: {args.aspect or config.DEFAULT_ASPECT} (change with --aspect).")
         return 0
     aspect = args.aspect or config.DEFAULT_ASPECT

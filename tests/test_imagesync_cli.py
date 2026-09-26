@@ -108,3 +108,13 @@ def test_real_client_is_guarded():
     import imagesync.cli as cli
     with pytest.raises(AssertionError, match="real Anthropic client"):
         cli.make_client()
+
+
+def test_suggested_confirm_command_keeps_a_non_default_aspect(cwd, capsys):
+    finish_novel(cwd)
+    capsys.readouterr()
+    im("--aspect", "9:16")
+    out = capsys.readouterr().out
+    assert "Confirm with --sub-style c --aspect 9:16, or pick another." in out
+    im("--sub-style", "c", "--aspect", "9:16")  # exactly the suggested command
+    assert json.loads(versions()[0][2])["style_lock"]["aspect"] == "9:16"
