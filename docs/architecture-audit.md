@@ -177,4 +177,4 @@ Each phase leaves a runnable CLI and a green `pytest` + `ruff check .`.
 | **4 — Tracker + chunks 2–N** | `tracker.py`, Prompt 10 + review gate + `--accept-tracker`, Prompt 11, Prompt 4 drafting for chunks 2–N. | A multi-chunk run on the fake LLM completes to all chunks `done`. Tracker merge and render tests pass. |
 | **5 — Hook + assemble + metadata** | D17 context check, Prompt 5 → 9 on the hook, splice + verify, full script assembly, metadata timestamps. | Script + metadata files are written. Splice and timestamp tests pass. One real run on a short public-domain novel completes. |
 
-Deferred until a real need exists: Part detection, a web UI, a cost cap, `--chapter-regex`, and Phase 2 image sync.
+Deferred until a real need exists: Part detection, a web UI, a cost cap, and `--chapter-regex`. Image sync (formerly "Phase 2") is its own system; see `docs/image-sync-plan.md`.

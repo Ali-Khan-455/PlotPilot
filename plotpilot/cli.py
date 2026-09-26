@@ -20,6 +20,12 @@ NO_HEADINGS = ("No chapter headings found (expected 'Chapter N', 'Chapter IV', '
                "'Prologue', 'Epilogue' on their own line after a blank line).")
 
 
+def slug_for(path: Path) -> str:
+    """The novel's name everywhere (database, output folders): the file stem, lowercased, runs of anything
+    but a-z/0-9 turned into single hyphens. Shared with imagesync."""
+    return re.sub(r"[^a-z0-9]+", "-", path.stem.lower()).strip("-")
+
+
 def fail(msg: str) -> int:
     print(msg, file=sys.stderr)
     return 1
@@ -53,7 +59,7 @@ def main(argv=None, client=None) -> int:
 
     if not path.is_file():
         return fail(f"Cannot read '{path}': not a regular file.")
-    slug = re.sub(r"[^a-z0-9]+", "-", path.stem.lower()).strip("-")
+    slug = slug_for(path)
     if not slug:
         return fail(f"Cannot derive a name from '{path.name}'; rename it with letters or digits.")
     try:
