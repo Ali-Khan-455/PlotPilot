@@ -6,6 +6,8 @@ from pathlib import Path
 
 import anthropic
 
+from plotpilot import config
+
 USAGE_HEADER = ["timestamp", "novel", "chunk", "kind", "model", "stop_reason", "input_tokens",
                 "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
 
@@ -39,6 +41,7 @@ class LLM:
         self._client = None
         self.log_dir = Path(log_dir)
         self._verified: set[str] = set()
+        self._limits: dict[str, int | None] = {}
 
     @property
     def client(self):
@@ -51,7 +54,7 @@ class LLM:
             if model_id in self._verified:
                 continue
             try:
-                self.client.models.retrieve(model_id)
+                info = self.client.models.retrieve(model_id)
             except anthropic.NotFoundError:
                 raise LLMError(f"Model ID '{model_id}' not found — check config.py or "
                                "--gen-model/--qc-model.") from None
@@ -60,6 +63,21 @@ class LLM:
                     raise LLMError(CREDENTIALS_MSG) from None
                 raise
             self._verified.add(model_id)
+            self._limits[model_id] = getattr(info, "max_input_tokens", None)
+
+    def context_limit(self, model_id) -> int:
+        """The model's input limit from models.retrieve; config.GEN_CONTEXT_TOKENS if it isn't given."""
+        self.check_models([model_id])
+        return self._limits.get(model_id) or config.GEN_CONTEXT_TOKENS
+
+    def count_tokens(self, model, user, system) -> int:
+        try:
+            return self.client.messages.count_tokens(
+                model=model, system=system, messages=[{"role": "user", "content": user}]).input_tokens
+        except TypeError as e:
+            if _is_auth_error(e):
+                raise LLMError(CREDENTIALS_MSG) from None
+            raise
 
     def call(self, kind, model, user, *, system=None, max_tokens, slug, chunk_idx) -> str:
         kwargs = dict(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": user}])

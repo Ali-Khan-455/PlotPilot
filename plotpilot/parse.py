@@ -244,3 +244,56 @@ def first_sentence(text: str) -> str:
 
 def count_sentences(text: str) -> int:
     return len(SENTENCE_END_RE.findall(text.strip())) or 1
+
+
+# --- Phase 5: hook (Prompt 5) and its Prompt 9 pass --------------------------------
+
+HOOK_MARKERS = ["<<<HOOK_START>>>", "<<<HOOK_END>>>"]
+HOOK_LENGTH_RE = re.compile(r"(?i)\bhook length\b")
+TERMINAL_RE = re.compile(r"[.!?][\"”’']?$")
+
+
+def norm_token(token: str) -> str:
+    """Lowercase, every non-alphanumeric character dropped (quotes and apostrophes included)."""
+    return "".join(ch for ch in token.lower() if ch.isalnum())
+
+
+def norm_words(text: str) -> list[str]:
+    return [w for w in map(norm_token, text.split()) if w]
+
+
+def ends_with_target(hook: str, target: str) -> bool:
+    """The hook's last N normalized words equal the target's (a literal duplication at the splice)."""
+    h, t = norm_words(hook), norm_words(target)
+    if not t or len(h) < len(t):
+        return False
+    return h[len(h) - len(t):] == t
+
+
+def _check_hook(hook: str, target: str) -> str:
+    if "<<<" in hook:
+        raise ParseError("hook contains delimiters")
+    if HOOK_LENGTH_RE.search(hook):
+        raise ParseError("hook-length text inside the hook")
+    if ends_with_target(hook, target):
+        raise ParseError("hook ends with the target sentence")
+    hook = " ".join(hook.split())
+    if not TERMINAL_RE.search(hook):
+        raise ParseError("hook does not end in terminal punctuation")
+    return hook
+
+
+def parse_hook(text: str, target: str) -> str:
+    """Prompt 5 output: the text between the hook delimiters. Anything outside them (such as the
+    "hook length" line) is ignored."""
+    for m in HOOK_MARKERS:
+        if text.count(m) != 1:
+            raise ParseError(f"{m} appears {text.count(m)} times, expected once")
+    if text.index(HOOK_MARKERS[0]) > text.index(HOOK_MARKERS[1]):
+        raise ParseError("delimiters out of order")
+    return _check_hook(_between(text, *HOOK_MARKERS), target)
+
+
+def check_hook_tts(new: str, hook: str, target: str) -> str:
+    """Prompt 9 on the hook: a rewrite check (Prompt 9's ratio) plus the hook checks."""
+    return _check_hook(check_rewrite(new, hook, min_ratio=config.TTS_MIN_RATIO), target)

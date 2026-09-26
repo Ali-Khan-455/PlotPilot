@@ -13,6 +13,7 @@ MARGIN = "I am a farmer's son in a poor village."
 TARGET = "Nobody expected much from me."
 BODY1 = f"{TARGET} Then the guard came. I ran for the hills."
 BODY2 = "I kept walking for days. The road was long. I reached the city at dusk."
+HOOK = "<<<HOOK_START>>>\nI got reborn as a farmer's son with zero talent.\n<<<HOOK_END>>>"  # Phase 5 P5
 
 
 def draft1(margin=MARGIN):
@@ -93,9 +94,10 @@ def test_accept_then_chunk2_gate_and_draft(cwd, capsys):
     assert "Aria Vale → the captain" in audit_user and config.EMPTY_TRACKER not in audit_user
     assert (cwd / "scripts" / "book" / "chunk-02.txt").read_text() == BODY2 + "\n"
 
-    code, _ = run("--accept-tracker")
+    code, _ = run("--accept-tracker", replies=[HOOK])
     assert code == 0 and status(2) == "done"
     assert "All 2 chunks done" in capsys.readouterr().out
+    assert (cwd / "scripts" / "book" / "script.txt").read_text().endswith(BODY2 + "\n")
 
 
 def test_edited_pending_json_is_merged(cwd):
@@ -195,7 +197,7 @@ def test_stale_pending_file_from_previous_chunk(cwd):
     run("--module", "B", replies=[BODY2, *_qc_for(BODY2), delta(chars=(), state="Reached the city.")])
     files = pending(cwd)
     assert len(files) == 1 and files[0].name.startswith("book.chunk-02.")
-    run("--accept-tracker")
+    run("--accept-tracker", replies=[HOOK])
     latest = json.loads(q("SELECT json FROM tracker_versions ORDER BY id DESC")[0][0])
     assert latest["last_state"] == "Reached the city."
 
@@ -321,7 +323,7 @@ def test_history_is_append_only_across_chunks(cwd):
     p_before = q("SELECT * FROM passes")
     run("--accept-tracker", replies=["B"])
     run("--module", "B", replies=[BODY2])
-    run("--accept-tracker")
+    run("--accept-tracker", replies=[HOOK])
     assert q("SELECT * FROM passes")[:len(p_before)] == p_before
     # tracker_versions prefix: covered by test_tracker_versions_prefix_unchanged (t_before is empty here)
 
@@ -350,7 +352,7 @@ def test_tracker_versions_prefix_unchanged(cwd):
     t_before = q("SELECT * FROM tracker_versions")
     assert len(t_before) == 1
     run("--module", "B", replies=[BODY2])
-    run("--accept-tracker")
+    run("--accept-tracker", replies=[HOOK])
     assert q("SELECT * FROM tracker_versions")[:1] == t_before and len(q("SELECT * FROM tracker_versions")) == 2
 
 

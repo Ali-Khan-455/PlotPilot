@@ -39,7 +39,7 @@ class _Stream:
 class FakeClient:
     """replies: str (end_turn) or (text, stop_reason) or an exception to raise."""
 
-    def __init__(self, replies=(), unknown_models=(), auto_qc=False):
+    def __init__(self, replies=(), unknown_models=(), auto_qc=False, context=200_000, token_count=100):
         """auto_qc: False; True (auto-answer Prompts 6, 7, 9, 10, 11); or "tracker" (only 10 and 11,
         so any unexpected QC call still fails with "ran out of scripted replies")."""
         self.replies = list(replies)
@@ -47,7 +47,9 @@ class FakeClient:
         self.unknown = set(unknown_models)
         self.calls = []       # kwargs of each messages.stream call
         self.retrieved = []   # model ids passed to models.retrieve
-        self.messages = SimpleNamespace(stream=self._stream)
+        self.context, self.token_count = context, token_count
+        self.counted = []     # kwargs of each messages.count_tokens call
+        self.messages = SimpleNamespace(stream=self._stream, count_tokens=self._count_tokens)
         self.models = SimpleNamespace(retrieve=self._retrieve)
 
     @staticmethod
@@ -77,7 +79,11 @@ class FakeClient:
         self.retrieved.append(model_id)
         if model_id in self.unknown:
             raise not_found()
-        return SimpleNamespace(id=model_id, max_input_tokens=200_000)
+        return SimpleNamespace(id=model_id, max_input_tokens=self.context)
+
+    def _count_tokens(self, **kwargs):
+        self.counted.append(kwargs)
+        return SimpleNamespace(input_tokens=self.token_count)
 
     def _stream(self, **kwargs):
         self.calls.append(kwargs)

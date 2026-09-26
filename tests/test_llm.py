@@ -1,7 +1,9 @@
 import csv
+from types import SimpleNamespace
 
 import pytest
 
+import plotpilot.config as config
 from plotpilot.llm import LLM, LLMError
 from tests.fakes import FakeClient
 
@@ -50,3 +52,32 @@ def test_client_is_created_lazily(tmp_path):
     assert made == []
     llm.call("draft", "m", "u", max_tokens=5, slug="n", chunk_idx=1)
     assert made == [1]
+
+
+def test_context_limit_from_retrieve_cached(tmp_path):
+    client = FakeClient(context=123_456)
+    llm = LLM(client, tmp_path)
+    llm.check_models(["m"])
+    assert llm.context_limit("m") == 123_456 and client.retrieved == ["m"]
+
+
+@pytest.mark.parametrize("info", [SimpleNamespace(id="m"), SimpleNamespace(id="m", max_input_tokens=None)])
+def test_context_limit_falls_back(tmp_path, info):
+    client = FakeClient()
+    client.models.retrieve = lambda _id: info
+    llm = LLM(client, tmp_path)
+    assert llm.context_limit("m") == config.GEN_CONTEXT_TOKENS
+
+
+def test_count_tokens_passes_system_and_messages(tmp_path):
+    client = FakeClient(token_count=42)
+    assert LLM(client, tmp_path).count_tokens("m", "u", "s") == 42
+    assert client.counted == [{"model": "m", "system": "s", "messages": [{"role": "user", "content": "u"}]}]
+
+
+def test_count_tokens_auth_error(tmp_path):
+    client = FakeClient()
+    auth = TypeError("Could not resolve authentication method")
+    client.messages.count_tokens = lambda **_: (_ for _ in ()).throw(auth)
+    with pytest.raises(LLMError, match="credentials"):
+        LLM(client, tmp_path).count_tokens("m", "u", "s")

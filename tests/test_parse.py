@@ -293,3 +293,59 @@ def test_first_sentence(text, first):
 def test_count_sentences():
     assert count_sentences("I am Kai. I farm.") == 2
     assert count_sentences("Just one") == 1
+
+
+# --- Phase 5: hook (Prompt 5) and hook TTS ----------------------------------------
+
+from plotpilot.parse import check_hook_tts, ends_with_target, norm_words, parse_hook  # noqa: E402
+
+HT = "Nobody expected much from me."
+
+
+def hook(inner, tail=""):
+    return f"<<<HOOK_START>>>\n{inner}\n<<<HOOK_END>>>\n{tail}"
+
+
+def test_parse_hook_accepts_and_collapses():
+    assert parse_hook(hook("I got reborn   a peasant.\nClassic."), HT) == "I got reborn a peasant. Classic."
+    assert parse_hook(hook("I was poor.", "hook length: 3 sentences"), HT) == "I was poor."
+    assert parse_hook("Sure.\n" + hook('I said "fine."'), HT) == 'I said "fine."'
+
+
+@pytest.mark.parametrize("text", [
+    "I was poor.",
+    hook("I was poor.") + hook("Again."),
+    "<<<HOOK_END>>>\nI was poor.\n<<<HOOK_START>>>",
+    hook("   "),
+    hook("I was poor. Nobody expected much from me."),
+    hook("I was poor. “Nobody expected much from me.”"),
+    hook("I was poor.\nhook length: 2 sentences"),
+    hook("I was poor and"),
+    hook("I was <<<poor>>>."),
+])
+def test_parse_hook_rejects(text):
+    with pytest.raises(ParseError):
+        parse_hook(text, HT)
+
+
+def test_hook_target_rule_is_end_only():
+    assert parse_hook(hook("I ran for my life as the dragon breathed fire."), "I ran.")
+    with pytest.raises(ParseError):
+        parse_hook(hook("The dragon attacked. I ran."), "I ran.")
+
+
+def test_norm_words_and_ends_with_target():
+    assert norm_words("“Don’t” — RUN!") == ["dont", "run"]
+    assert ends_with_target("The dragon attacked. I ran!", "I ran.")
+    assert not ends_with_target("I ran home.", "I ran.")
+    assert not ends_with_target("Anything.", "—")
+
+
+def test_check_hook_tts():
+    assert check_hook_tts("I was 3 years old.", "I was 3 years old.", HT) == "I was 3 years old."
+    assert check_hook_tts("I was three years old.", "I was 3 years old.", HT)
+    for bad in ["I was old.", "Here is the normalized narration:\nI was three years old.",
+                "I was three years old. Nobody expected much from me.",
+                "I was three years old.\nhook length: 1 sentence"]:
+        with pytest.raises(ParseError):
+            check_hook_tts(bad, "I was 3 years old.", HT)

@@ -39,3 +39,8 @@ def test_phase4_placeholders_exist():
     fill(P["10"].text, {"[paste chunk number]": "2", "[Paste Continuity Tracker]": "t",
                         "[Paste finished narration for this chunk]": "n"})
     fill(P["11"].text, {"[Paste finished narration for this chunk]": "n"})
+
+
+def test_phase5_placeholders_exist():
+    fill(P["5"].text, {"[paste that exact saved sentence here]": "t",
+                       "[Paste the full assembled Part 1 narration here]": "n"})

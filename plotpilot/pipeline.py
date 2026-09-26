@@ -282,10 +282,11 @@ def run_novel(conn, llm, prompts, novel_id, slug, title, *, module, redraft, rep
                 print("Note: --repair-margin ignored; chunk 1 is frozen because its tracker has already been merged.")
             if flags["accept_tracker"] or flags["accept"]:
                 print("Note: accept flags ignored; every chunk is done.")
-            n = len(rows)
-            print(f"All {n} chunks done → {Path(out_dir) / slug}/. Hook, assembly and metadata are not built "
-                  "yet (Phase 5).")
-            return 0
+            from plotpilot import final
+
+            print(f"All {len(rows)} chunks done → {Path(out_dir) / slug}/.")
+            return final.run_final(conn, llm, prompts, novel_id, slug, title, gen_model=gen_model,
+                                   qc_model=qc_model, out_dir=out_dir)
         if flags["repair"] and (chunk1_done or current["idx"] != 1):
             print("Note: --repair-margin ignored; chunk 1 is frozen because its tracker has already been merged.")
             flags["repair"] = False
