@@ -24,8 +24,8 @@ This plan turns that doc into a tool in the same style as PlotPilot:
 - no summarization fallback for context limits.
 
 **Blocked on you before IS-1 can start:**
-- the v3 spec text must be committed to the repo (it isn't there yet);
-- Q0 (the second spec file) and Q1 (output contracts) need your approval.
+- the v3 spec text (you're pasting it next);
+- confirmation of C1–C3 (see below). Q0–Q9 are answered.
 
 ## Decisions on the seven questions
 
@@ -290,7 +290,7 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
 - Flow or any image API calls.
 - Automatic image download.
 - The SDXL+LoRA backend, beyond keeping `target.py` swappable.
-- Mode B (TurboScribe input) until a real need exists (Q5).
+- Mode B (TurboScribe input): deferred until a real user needs it (Q5 decision).
 - A video editor.
 - A web UI.
 - Summarization of any kind.
@@ -306,7 +306,50 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
 - There is a crash or resume test for every gate and transition.
 - One real run on the same public-domain novel PlotPilot is first run on. It is operator-side, because there's no API key or Flow access here.
 
-## Open questions (can't be decided from the repo or the spec)
+## Review log
+
+`plan-reviewer`, three rounds. The final one-line fix (TDD step 4 asserting `UNIQUE(source_pass_id)`) was applied without a fourth pass, at your instruction.
+
+## Decisions (user, answers to Q0–Q9)
+
+- **Q0 (spec file): approved.** `prompts/image-sync-v3.md` is added verbatim once you paste the text. IS-1 amends CLAUDE.md and `docs/architecture-audit.md` to say: "Each system owns its own prompt spec file under `prompts/`." The rule that no prompt text lives in code is unchanged.
+- **Q1 (contracts): approved.** A "TOOL OUTPUT CONTRACTS" appendix is added to the v3 spec for Stage 0, Stage 1, each Stage 2 batch and the Bible update. The v3 prompt text itself is unchanged. The exact shapes are subject to C1 below.
+- **Q2 (Bible entries): approved.** Stage 2 receives only the Bible entries named by `@Name` in its batch, each with its current state. This rule is stated in the contracts appendix.
+- **Q3 (Flow): no API.** Manual paste. `target.py` is the swap point for SDXL+LoRA (a ComfyUI API later).
+- **Q4 (validation): hand-written validators.** No Pydantic.
+- **Q5 (TurboScribe): deferred.** Mode B ships when a user needs it (see Out of scope).
+- **Q6 (models):**
+  - Stage 0 and Stage 2 use GEN (Sonnet).
+  - Stage 1 defaults to GEN, overridable with `--stage1-model`.
+  - The Bible update defaults to QC (Haiku), overridable with `--bible-model`. See C2 for which call that is.
+- **Q7 (sub-style): suggest, then confirm.**
+  - The tool counts the module on each PlotPilot chunk's latest ok draft pass and maps the dominant one to a sub-style.
+  - It prints `Suggested sub-style: (x) … (from dominant module M). Confirm with --sub-style x, or pick another.`
+  - It refuses to run Stage 0 until confirmed. Once locked, the sub-style stays locked. The mapping is subject to C3.
+- **Q8 (Bible gate): mandatory.** `--accept-bible` has the same shape as `--accept-tracker`: explicit, one-shot per chunk, no auto-advance. Every accept is logged to `logs/bible-accepts.log`.
+- **Q9 (duplicate timestamps): disambiguate filenames.**
+  - First `04:15` → `beat_04-15.png`, second → `beat_04-15_2.png`, third → `beat_04-15_3.png`.
+  - The manifest and the beat list keep the raw timecode.
+  - v3's naming section is amended to say so.
+  - `--revise-beat` takes `04-15_2` to name the second occurrence.
+  - Later, sub-second or per-scene offsets in PlotPilot could remove the collision at its source. That is out of scope now.
+
+## Conflicts to confirm before IS-1
+
+- **C1 — Contract fields versus the "code enforces" design (Q1).** As literally specified, three contract fields would move work from code to the model. The proposal keeps each field but gives code the final say, like PlotPilot's tracker merge forcing a term's `chunk`.
+  - **Stage 2 `prompt`:** the model returns the scene composition only. Code appends the `@Name` references and the locked suffix loaded from the spec. If the model wrote the whole prompt, the suffix would no longer be guaranteed word for word, which is v3's hardest rule.
+  - **Stage 2 `manifest_rows`:** code derives the manifest from the stored prompts: timecode, shot type and the first 5 words of the scene. Any `manifest_rows` the model returns are ignored, and the field is dropped from the contract so there aren't two sources for the same data.
+  - **Stage 1 `slot` and Stage 0 `cadence_warning`:** code assigns slots, applying the lock, the 5/14 limits and `fallback`. Code also computes cadence from the timecodes. The model's values are ignored, and the fields are dropped from the contracts.
+- **C2 — What "the Bible update" call is (Q6).** Stage 1's Bible additions come from the Stage 1 call itself, which is the new references plus their descriptors. So `--bible-model` governs one separate, cheaper call at the end of Stage 2. That call reads the chunk's beats and delivered prompts and returns the **continuity-log delta** (state changes and superseded entries) as JSON. Code merges it, then the mandatory `--accept-bible` gate follows.
+- **C3 — Sub-style mapping (Q7).** The answer mapped module A to (a) Dark action. But module A is isekai, system and power fantasy, which v3's sub-style (c) Fantasy adventure (Tower of God, *The Beginning After the End*) describes. The proposed mapping is:
+  - A → (c) Fantasy adventure;
+  - B → (b) Soft romance;
+  - C → (a) Dark action;
+  - D → (d) Comedy slice of life.
+
+  Please confirm, or say if A → (a) was intended.
+
+## Open questions (answered — kept for reference)
 
 - **Q0 — Second spec file.** CLAUDE.md names `prompts/v4-spec.md` as the only prompt source. Do you approve `prompts/image-sync-v3.md` as a second one? CLAUDE.md and the architecture audit would be amended in IS-1. Can you also commit the v3 text, or paste it for me to add verbatim? IS-1 is blocked until then.
 - **Q1 — Output contracts.** v3's stages emit free-text blocks. For code to validate them, Stages 0, 1 and 2 need JSON output contracts. The proposal is to append a "TOOL OUTPUT CONTRACTS" section to the v3 spec and change nothing else. That is a spec edit, which needs your approval. The alternative is to parse v3's free text, which is fragile.
