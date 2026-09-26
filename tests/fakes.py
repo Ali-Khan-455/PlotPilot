@@ -39,7 +39,8 @@ class _Stream:
 class FakeClient:
     """replies: str (end_turn) or (text, stop_reason) or an exception to raise."""
 
-    def __init__(self, replies=(), unknown_models=(), auto_qc=False, context=200_000, token_count=100):
+    def __init__(self, replies=(), unknown_models=(), auto_qc=False, context=200_000, token_count=100,
+                 thinking=False):
         """auto_qc: False; True (auto-answer Prompts 6, 7, 9, 10, 11); or "tracker" (only 10 and 11,
         so any unexpected QC call still fails with "ran out of scripted replies")."""
         self.replies = list(replies)
@@ -48,6 +49,7 @@ class FakeClient:
         self.calls = []       # kwargs of each messages.stream call
         self.retrieved = []   # model ids passed to models.retrieve
         self.context, self.token_count = context, token_count
+        self.thinking = thinking  # prepend a thinking block to every reply, as Sonnet 5 does by default
         self.counted = []     # kwargs of each messages.count_tokens call
         self.messages = SimpleNamespace(stream=self._stream, count_tokens=self._count_tokens)
         self.models = SimpleNamespace(retrieve=self._retrieve)
@@ -97,7 +99,8 @@ class FakeClient:
             raise reply
         text, stop = (reply, "end_turn") if isinstance(reply, str) else reply
         return _Stream(SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=text)],
+            content=[SimpleNamespace(type="thinking", thinking="hmm")] * self.thinking
+            + [SimpleNamespace(type="text", text=text)],
             stop_reason=stop,
             stop_details=SimpleNamespace(category="cyber") if stop == "refusal" else None,
             usage=SimpleNamespace(input_tokens=100, output_tokens=len(text.split()),

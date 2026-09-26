@@ -352,3 +352,15 @@ def test_check_hook_tts():
                 "I was three years old.\nhook length: 1 sentence"]:
         with pytest.raises(ParseError):
             check_hook_tts(bad, "I was 3 years old.", HT)
+
+
+# --- deferred minors (Phase 2) --------------------------------------------------
+
+def test_check_margin_quoted_opening():
+    assert check_margin('"But I was poor," I said.') == "sentence starts with 'But'"
+    assert check_margin("“And so I left.”") == "sentence starts with 'And'"
+
+
+def test_check_margin_more_than_two_sentences():
+    assert check_margin("I am a boy. I live here. I farm.") == "more than two sentences"
+    assert check_margin("I am a boy. I live here.") is None

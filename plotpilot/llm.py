@@ -86,7 +86,8 @@ class LLM:
         try:
             with self.client.messages.stream(**kwargs) as stream:
                 msg = stream.get_final_message()
-        except TypeError as e:
+        except Exception as e:
+            self._log_row(slug, chunk_idx, kind, model, f"error:{type(e).__name__}", ["", "", "", ""])
             if _is_auth_error(e):
                 raise LLMError(CREDENTIALS_MSG) from None
             raise
@@ -100,14 +101,18 @@ class LLM:
         return text
 
     def _log_usage(self, slug, chunk_idx, kind, model, msg):
+        u = msg.usage
+        self._log_row(slug, chunk_idx, kind, model, msg.stop_reason,
+                      [u.input_tokens, u.output_tokens, u.cache_creation_input_tokens or 0,
+                       u.cache_read_input_tokens or 0])
+
+    def _log_row(self, slug, chunk_idx, kind, model, stop_reason, tokens):
+        """One usage.csv row per call; a call that fails mid-stream gets empty token fields."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         path = self.log_dir / "usage.csv"
         new = not path.exists()
-        u = msg.usage
         with open(path, "a", newline="") as f:
             w = csv.writer(f)
             if new:
                 w.writerow(USAGE_HEADER)
-            w.writerow([datetime.now(timezone.utc).isoformat(), slug, chunk_idx, kind, model,
-                        msg.stop_reason, u.input_tokens, u.output_tokens,
-                        u.cache_creation_input_tokens or 0, u.cache_read_input_tokens or 0])
+            w.writerow([datetime.now(timezone.utc).isoformat(), slug, chunk_idx, kind, model, stop_reason, *tokens])

@@ -2,19 +2,6 @@
 
 Minor findings from each phase's final code review. They were deliberately left out of that phase's fix pass: none of them corrupts output or loses data. Fix them whenever it's convenient, write a failing test first, and delete the entry once it's fixed.
 
-## Phase 2 — Chunk 1 draft
-
-- [ ] **A classification that stops at `max_tokens` is not retried** (`pipeline.py`, `_attempt`, `CLASSIFY_MAX_TOKENS=16`). A chatty reply exits 1 on the first try. Treat `max_tokens` on classify as a parse failure so retry-once applies.
-- [ ] **The model-caching test at pipeline level is vacuous** (`tests/test_pipeline.py::test_classify_then_draft_retrieves_each_model_once`). Each `main()` builds a fresh `LLM`. The unit test in `tests/test_llm.py` does cover caching.
-- [ ] **The classify `input_text` assertion is weak** (`tests/test_pipeline.py::test_gate_classifies_once_and_reuses`). Assert `"=====" not in input_text` instead of checking only the start.
-- [ ] **`FakeClient` never returns a non-text block** (`tests/fakes.py`). The text-only join in `llm.py` is untested against thinking blocks, which Sonnet 5 emits by default.
-- [ ] **`check_margin` misses quoted sentence openings** (`parse.py`). `"But I was poor," I said.` does not trigger the `But/And` rule.
-- [ ] **The margin count cap is loose** (`parse.py`). The cap is `> 9`, but Prompt 3 allows at most 2 sentences. Nothing checks the length of a repaired margin either.
-- [ ] **A forced repair ignores `--module` silently** (`pipeline.py`, the `drafted and repair` branch). The plain drafted path prints a note.
-- [ ] **"Malformed twice" failures are not written to `errors.log`** (`pipeline.py`, draft and classify). They exit 1 with a message only.
-- [ ] **A spec section with a COPY line but no END line crashes with a bare `StopIteration`** (`prompts.py`, `load_prompts`). Raise a clear error naming the section instead.
-- [ ] **No usage row is written when a call fails mid-stream** (`llm.py`, `call`). If `get_final_message` raises, nothing is logged. This may be unavoidable.
-
 ## Phase 3 — QC chain
 
 - [ ] **The `check_rewrite` preamble and sign-off heuristics are narrow** (`parse.py`). These leak into narration: `Sure! Here is the normalized narration:`, `Normalized narration:`, `I hope this helps!`, `End of normalized narration.`, and 8-word-plus notes such as `Note: I kept the phonetic hint for Kael unchanged as instructed.`. It also rejects a genuine Prompt 8 cliffhanger ending in `Then the door opened—`, which has no terminal punctuation.

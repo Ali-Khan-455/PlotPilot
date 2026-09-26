@@ -27,7 +27,9 @@ def load_prompts(path: Path = config.SPEC_PATH) -> dict[str, Prompt]:
         begin = next((j for j, ln in enumerate(section) if ln.startswith("**COPY EVERYTHING BELOW")), None)
         if begin is None:
             continue  # e.g. the PROMPT 2 intro; its text lives in the modules
-        end = next(j for j in range(begin + 1, len(section)) if section[j].startswith("**END OF "))
+        end = next((j for j in range(begin + 1, len(section)) if section[j].startswith("**END OF ")), None)
+        if end is None:
+            raise ValueError(f"Spec section '{lines[i].lstrip('#').strip()}' has a COPY line but no **END OF line.")
         key = m[1] if m[1] else f"MODULE {m[2]}"
         prompts[key] = Prompt(lines[i].lstrip("#").strip(), "\n".join(section[begin + 1:end]).strip())
     return prompts

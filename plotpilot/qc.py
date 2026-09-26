@@ -70,7 +70,9 @@ def _override(c, reason):
 
 
 def _malformed(c, what, e):
-    print(f"Chunk {c.idx} {what} output was {e}; raw outputs are stored. Re-run to try again.")
+    msg = f"Chunk {c.idx} {what} output was {e}; raw outputs are stored. Re-run to try again."
+    print(msg)
+    log_error(c.llm.log_dir, msg)
     return 1
 
 

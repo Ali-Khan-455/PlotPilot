@@ -66,7 +66,7 @@ def test_gate_classifies_once_and_reuses(cwd, capsys):
         assert heading in user
     assert "system" not in client.calls[0]
     row = passes()[0]
-    assert row[0] == "classify" and not row[5].startswith("\n\n=====")
+    assert row[0] == "classify" and "=====" not in row[5]
 
     code, client = run(replies=[])
     assert code == 0 and client.calls == [] and client.retrieved == []
@@ -95,12 +95,11 @@ def test_draft_writes_clean_narration(cwd):
     assert client.calls[0]["max_tokens"] == config.GEN_MAX_TOKENS
 
 
-def test_classify_then_draft_retrieves_each_model_once(cwd):
-    client = FakeClient(["B", draft()], auto_qc=True)
-    main(["--novel", "book.txt"], client=client)
-    main(["--novel", "book.txt", "--module", "B"], client=client)
-    # run 1: classify (qc); run 2: draft (gen) then QC (qc) — each model once per run, never twice
-    assert client.retrieved == [config.QC_MODEL, config.GEN_MODEL, config.QC_MODEL]
+def test_each_model_is_retrieved_once_per_run(cwd):
+    code, client = run("--module", "A", replies=[draft()])
+    qc_calls = [c for c in client.calls if c["model"] == config.QC_MODEL]
+    assert code == 0 and len(qc_calls) >= 5  # P6, P7, P9, P10, P11 share one retrieve
+    assert client.retrieved == [config.GEN_MODEL, config.QC_MODEL]
 
 
 def test_hooky_margin_triggers_repair(cwd, capsys):
@@ -263,3 +262,31 @@ def test_mutating_runs_never_rewrite_earlier_rows(cwd):
     run("--redraft", replies=[draft(margin="Third.")])
     after = passes()
     assert len(after) == len(before) + 2 and after[:len(before)] == before
+
+
+# --- deferred minors (Phase 2) --------------------------------------------------
+
+def test_classify_stopped_at_max_tokens_is_retried(cwd, capsys):
+    code, _ = run(replies=[("I think the answer is", "max_tokens"), "C"])
+    assert code == 0 and "Suggested module for chunk 1: C" in capsys.readouterr().out
+    assert [p[3] for p in passes()] == ["STOPPED:max_tokens", None]
+
+
+def test_malformed_twice_is_logged(cwd):
+    run(replies=["Module C", "I think C"])
+    run("--module", "A", replies=["bad", "still bad"])
+    log = (cwd / "logs" / "errors.log").read_text()
+    assert "classification" in log and "draft output was malformed twice" in log
+
+
+def test_forced_repair_notes_ignored_module(cwd, capsys):
+    run("--module", "A", replies=[draft()])
+    capsys.readouterr()
+    code, _ = run("--repair-margin", "--module", "C", replies=[repair("Operator margin.")])
+    assert code == 0 and "--module is ignored" in capsys.readouterr().out
+
+
+def test_thinking_blocks_are_ignored(cwd):
+    client = FakeClient([draft()], auto_qc=True, thinking=True)
+    assert main(["--novel", "book.txt", "--module", "A"], client=client) == 0
+    assert chunk_file(cwd).startswith(MARGIN + "\n\n" + TARGET)

@@ -44,3 +44,10 @@ def test_phase4_placeholders_exist():
 def test_phase5_placeholders_exist():
     fill(P["5"].text, {"[paste that exact saved sentence here]": "t",
                        "[Paste the full assembled Part 1 narration here]": "n"})
+
+
+def test_copy_without_end_is_a_clear_error(tmp_path):
+    spec = tmp_path / "spec.md"
+    spec.write_text("## PROMPT 1 — Broken\n\n**COPY EVERYTHING BELOW**\n\ntext with no end\n")
+    with pytest.raises(ValueError, match="PROMPT 1 — Broken.*no \\*\\*END OF"):
+        load_prompts(spec)

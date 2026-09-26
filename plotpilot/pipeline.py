@@ -133,9 +133,10 @@ class ChunkRun:
                               progress=f"Part 1, Chunk {prev['idx']} — {prev['label']} processed so far")
 
     def attempt(self, kind, model, user, parse, *, system=None, max_tokens, module=None, note=None,
-                status_for=None):
+                status_for=None, retry_max_tokens=False):
         """Call, parse in memory, insert the pass once with its verdict (and, atomically, the
-        status from status_for(parsed)). Retry once on ParseError."""
+        status from status_for(parsed)). Retry once on ParseError (and, with retry_max_tokens, on a
+        max_tokens stop, e.g. a chatty one-letter classification)."""
         input_text = f"{system}\n\n=====\n\n{user}" if system is not None else user
         last = None
         for _ in range(2):
@@ -146,6 +147,9 @@ class ChunkRun:
                 if e.stop_reason:
                     db.add_pass(self.conn, self.novel_id, self.chunk["id"], kind, model, input_text,
                                 e.text, module=module, verdict=f"STOPPED:{e.stop_reason}", note=note)
+                if retry_max_tokens and e.stop_reason == "max_tokens":
+                    last = ParseError(f"stopped at max_tokens: {e.text[:40]!r}")
+                    continue
                 raise
             try:
                 parsed = parse(text)
@@ -172,10 +176,12 @@ class ChunkRun:
                                             "[Paste the opening of this chunk]": opening})
             try:
                 letter = self.attempt("classify", self.qc_model, user, parse_module,
-                                      max_tokens=config.CLASSIFY_MAX_TOKENS)
+                                      max_tokens=config.CLASSIFY_MAX_TOKENS, retry_max_tokens=True)
             except ParseError as e:
-                print(f"Module classification for chunk {self.idx} was {e}; raw outputs are stored. "
-                      "Re-run, or pass --module.")
+                msg = (f"Module classification for chunk {self.idx} was {e}; raw outputs are stored. "
+                       "Re-run, or pass --module.")
+                print(msg)
+                log_error(self.llm.log_dir, msg)
                 return 1
         title = self.P[f"MODULE {letter}"].heading.split(" — ", 1)[1]
         print(f"Suggested module for chunk {self.idx}: {letter} ({title}). "
@@ -324,6 +330,8 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
         return qc.run(c, accept=accept, edited=edited, accept_tracker=accept_tracker)
 
     if started and repair and not redraft:
+        if module:
+            print(f"Note: --module is ignored; chunk {c.idx} is already drafted (use --redraft to redo it).")
         state = narration_state(c.conn, c.chunk["id"])
         c.repair(state.margin, state.target, FORCED)
         c.write()
@@ -338,7 +346,9 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
     try:
         d = c.draft(module, note="--redraft requested" if started else None)
     except ParseError as e:
-        print(f"Chunk {c.idx} draft output was {e}; raw outputs are stored. Re-run to try again.")
+        msg = f"Chunk {c.idx} draft output was {e}; raw outputs are stored. Re-run to try again."
+        print(msg)
+        log_error(c.llm.log_dir, msg)
         return 1
 
     if c.first:

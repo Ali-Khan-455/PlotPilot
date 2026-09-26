@@ -102,8 +102,10 @@ def check_margin(margin: str) -> str | None:
         if phrase in low:
             return f"phrase '{phrase}'"
     sentences = [s for s in SENTENCE_SPLIT_RE.split(margin.strip()) if s]
+    if count_sentences(margin) > 2:  # Prompt 3: 1–2 sentences (also re-checks a repaired margin)
+        return "more than two sentences"
     for s in sentences:
-        m = re.match(r"(But|And)\b", s)
+        m = re.match(r"[\"“‘']?(But|And)\b", s)
         if m:
             return f"sentence starts with '{m[1]}'"
     avg = sum(len(s.split()) for s in sentences) / len(sentences)

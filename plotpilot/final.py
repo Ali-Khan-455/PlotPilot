@@ -52,8 +52,7 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
             c.attempt("hook", gen_model, user, lambda t: parse_hook(t, target), system=system,
                       max_tokens=config.HOOK_MAX_TOKENS, module=module)
         except ParseError as e:
-            print(f"Hook output was {e}; raw outputs are stored. Re-run to try again.")
-            return 1
+            return _fail(c, f"Hook output was {e}; raw outputs are stored. Re-run to try again.")
         hook_pass = db.latest_pass(conn, cid, "hook")
     hook = parse_hook(hook_pass["output_text"], target)
 
@@ -66,8 +65,7 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
             c.attempt("hook_tts", qc_model, user, lambda t: check_hook_tts(t, hook, target),
                       max_tokens=config.QC_MAX_TOKENS)
         except ParseError as e:
-            print(f"Hook TTS normalization output was {e}; raw outputs are stored. Re-run to try again.")
-            return 1
+            return _fail(c, f"Hook TTS normalization output was {e}; raw outputs are stored. Re-run to try again.")
         tts_pass = db.latest_pass(conn, cid, "hook_tts", after_id=hook_pass["id"])
     hook = check_hook_tts(tts_pass["output_text"], hook, target)
 

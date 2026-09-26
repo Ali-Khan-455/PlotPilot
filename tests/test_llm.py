@@ -81,3 +81,12 @@ def test_count_tokens_auth_error(tmp_path):
     client.messages.count_tokens = lambda **_: (_ for _ in ()).throw(auth)
     with pytest.raises(LLMError, match="credentials"):
         LLM(client, tmp_path).count_tokens("m", "u", "s")
+
+
+def test_failed_stream_still_logs_a_usage_row(tmp_path):
+    from tests.fakes import connection_error
+    llm = LLM(FakeClient([connection_error()]), tmp_path)
+    with pytest.raises(Exception):
+        llm.call("draft", "m", "u", max_tokens=5, slug="n", chunk_idx=1)
+    rows = list(csv.reader(open(tmp_path / "usage.csv")))
+    assert rows[1][3:6] == ["draft", "m", "error:APIConnectionError"] and rows[1][6:] == ["", "", "", ""]
