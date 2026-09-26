@@ -271,6 +271,8 @@ def ends_with_target(hook: str, target: str) -> bool:
 
 
 def _check_hook(hook: str, target: str) -> str:
+    if not norm_words(hook):
+        raise ParseError("hook has no words")
     if "<<<" in hook:
         raise ParseError("hook contains delimiters")
     if HOOK_LENGTH_RE.search(hook):

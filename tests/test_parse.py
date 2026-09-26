@@ -322,6 +322,9 @@ def test_parse_hook_accepts_and_collapses():
     hook("I was poor.\nhook length: 2 sentences"),
     hook("I was poor and"),
     hook("I was <<<poor>>>."),
+    hook("."),
+    hook("“.”"),
+    hook("…."),
 ])
 def test_parse_hook_rejects(text):
     with pytest.raises(ParseError):

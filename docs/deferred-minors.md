@@ -71,7 +71,6 @@ Minor findings from each phase's final code review. They were deliberately left 
 
 ## Phase 5 — Hook + assemble + metadata
 
-- [ ] **A hook with no words is accepted** (`parse.py`, `_check_hook`). A Prompt 5 output of `<<<HOOK_START>>>.<<<HOOK_END>>>`, `"."` or `…` passes because it ends in terminal punctuation. The script then opens with a paragraph that is only punctuation, and Prompt 5 never runs again. The fix is one line: raise `ParseError` when `norm_words(hook)` is empty.
 - [ ] **Prompt 9 on the hook can't drop even one word** (`parse.py`, `check_hook_tts` at `TTS_MIN_RATIO` 0.97). On a hook under about 33 words, a legitimate one-word rewrite for a homograph (Prompt 9 item 3) is rejected, and the hook has no override. This was a deliberate plan choice. The alternative is an absolute slack, such as `len(new) >= len(old) - 1`.
 - [ ] **`script.txt` and `metadata/<slug>.txt` are overwritten silently on every run** (`final.py`). A hand fix to the script after a finished run is lost with no warning. Chunk files do get a warning (`_check_done_chunks`). Warn when the existing file differs from the rebuilt text.
 - [ ] **D17 at the real limit is unverified** (`final.py`, `count_tokens`). If `messages.count_tokens` returns a 400 for an oversize request, the operator sees a generic `ERROR:` instead of the D17 message. Check this during the first live run, or catch `anthropic.BadRequestError` there and treat it as D17.
