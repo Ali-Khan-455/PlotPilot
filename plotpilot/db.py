@@ -115,7 +115,8 @@ def latest_pass(conn, chunk_id, kind, after_id=None):
 
 def chunks(conn, novel_id):
     return conn.execute(
-        "SELECT id, idx, label, status, source_text FROM chunks WHERE novel_id = ? ORDER BY idx", (novel_id,)
+        "SELECT id, idx, label, status, source_text, chapter_start, chapter_end FROM chunks"
+        " WHERE novel_id = ? ORDER BY idx", (novel_id,)
     ).fetchall()
 
 
@@ -138,6 +139,12 @@ def add_tracker_version(conn, novel_id, chunk_id, tracker_json, delta_json, new_
 
 def latest_tracker(conn, novel_id):
     """The newest accepted tracker JSON string, or None."""
-    row = conn.execute("SELECT json FROM tracker_versions WHERE novel_id = ? ORDER BY id DESC LIMIT 1",
-                       (novel_id,)).fetchone()
+    row = latest_tracker_row(conn, novel_id)
     return row["json"] if row else None
+
+
+def latest_tracker_row(conn, novel_id):
+    """The newest accepted tracker version (json, chunk idx), or None."""
+    return conn.execute(
+        "SELECT t.json, c.idx FROM tracker_versions t JOIN chunks c ON c.id = t.chunk_id"
+        " WHERE t.novel_id = ? ORDER BY t.id DESC LIMIT 1", (novel_id,)).fetchone()

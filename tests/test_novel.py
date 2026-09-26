@@ -361,3 +361,94 @@ def test_tracker_only_auto_mode_rejects_extra_qc_calls(cwd):
     client = FakeClient([draft1()], auto_qc="tracker")
     with pytest.raises(AssertionError, match="ran out"):
         main(["--novel", "book.txt", "--module", "A"], client=client)  # P6 is not auto-answered
+
+
+# --- deferred minors (Phase 4) --------------------------------------------------
+
+def _chunk1_done():
+    _run_with_delta(delta())
+    run("--accept-tracker", replies=["B"])
+
+
+def test_mirror_is_regenerated_on_every_run(cwd):
+    _chunk1_done()
+    mirror = cwd / "trackers" / "book.md"
+    mirror.unlink()  # a crash after the version insert, before the mirror write
+    run()
+    assert "Aria Vale → the captain" in mirror.read_text()
+
+
+def test_scenes_malformed_twice(cwd, capsys):
+    from tests.fakes import AUTO_AUDIT, AUTO_PASS
+    code, _ = run("--module", "A", replies=[draft1(), AUTO_AUDIT, AUTO_PASS, BODY1, delta(), "junk", "junk"])
+    assert code == 1 and status(1) == "normalized"
+    assert "scenes output was malformed twice" in capsys.readouterr().out
+
+
+def test_accept_with_pending_file_missing(cwd, capsys):
+    _run_with_delta(delta())
+    [p] = pending(cwd)
+    p.unlink()
+    code, _ = run("--accept-tracker")
+    assert code == 1 and status(1) == "tracker_pending" and "not found" in capsys.readouterr().out
+    assert q("SELECT id FROM tracker_versions") == []
+
+
+def test_redraft_at_tracker_pending_replaces_bound_file(cwd):
+    _run_with_delta(delta())
+    [old] = pending(cwd)
+    run("--redraft", replies=[draft1()])
+    [new] = pending(cwd)
+    assert new != old and not old.exists()
+
+
+def test_redraft_on_planned_chunk_with_module_drafts(cwd, capsys):
+    _chunk1_done()
+    capsys.readouterr()
+    code, client = run("--redraft", "--module", "B", replies=[BODY2])
+    assert code == 0 and status(2) == "tracker_pending"
+    assert "--redraft ignored; no drafted chunk" in capsys.readouterr().out
+    assert "This is a continuation" in client.calls[0]["messages"][0]["content"]
+
+
+def test_progress_line_is_cumulative(cwd):
+    _chunk1_done()
+    run("--module", "B", replies=[BODY2])
+    run("--accept-tracker", replies=[HOOK])
+    assert "Part 1, Chunk 2 — Chapters 1–6 processed so far" in (cwd / "trackers" / "book.md").read_text()
+
+
+def test_pending_file_with_bom_is_accepted(cwd):
+    _run_with_delta(delta())
+    [p] = pending(cwd)
+    p.write_bytes(b"\xef\xbb\xbf" + p.read_bytes())
+    code, _ = run("--accept-tracker", replies=["B"])
+    assert code == 0 and status(1) == "done"
+
+
+def test_stale_done_chunk_file_is_rewritten_quietly(cwd, capsys):
+    _chunk1_done()
+    f = cwd / "scripts" / "book" / "chunk-01.txt"
+    f.write_text(f"{MARGIN} {BODY1}\n")  # Phase 2's single-space rendering
+    capsys.readouterr()
+    run()
+    out = capsys.readouterr().out
+    assert "was edited after its tracker was merged" not in out
+    assert f.read_text() == f"{MARGIN}\n\n{BODY1}\n"
+
+
+def test_gate_keeps_unrelated_glob_matches(cwd):
+    _run_with_delta(delta())
+    odd = cwd / "trackers" / "book.chunk-01.delta-x.pending.json"
+    odd.write_text("{}")
+    run()
+    assert odd.exists()
+
+
+def test_margin_sentences_taken_from_the_draft(cwd):
+    from tests.fakes import AUTO_AUDIT, AUTO_PASS
+    margin = "I work for Mr. Smith on his farm."
+    run("--module", "A", replies=[draft1(margin), AUTO_AUDIT, AUTO_PASS, BODY1, delta()])
+    run("--accept-tracker", replies=["B"])
+    chunk1 = json.loads(q("SELECT json FROM tracker_versions")[0][0])["chunk1"]
+    assert chunk1["margin"] == margin and chunk1["margin_sentences"] == 1

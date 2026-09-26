@@ -47,14 +47,15 @@ def _obj_list(obj, key, fields):
     for it in items:
         _need(isinstance(it, dict) and set(it) == set(fields), f"'{key}' items need exactly {sorted(fields)}")
         for f, typ in fields.items():
-            _need(isinstance(it[f], typ) and not isinstance(it[f], bool), f"'{key}.{f}' must be {typ.__name__}")
+            name = " or ".join(t.__name__ for t in typ) if isinstance(typ, tuple) else typ.__name__
+            _need(isinstance(it[f], typ) and not isinstance(it[f], bool), f"'{key}.{f}' must be {name}")
 
 
 def validate_delta(obj) -> dict:
     """Prompt 10 schema (D18): exact keys, exact types."""
     _need(isinstance(obj, dict) and set(obj) == DELTA_KEYS, f"tracker delta needs exactly {sorted(DELTA_KEYS)}")
     _obj_list(obj, "new_characters", {"name": str, "standin": str})
-    _obj_list(obj, "new_terms", {"term": str, "meaning": str, "chunk": int})
+    _obj_list(obj, "new_terms", {"term": str, "meaning": str, "chunk": (int, str)})  # merge sets chunk anyway
     for key in ("new_comparisons", "new_texture_motifs", "nickname_collisions"):
         _str_list(obj, key)
     _need(isinstance(obj["chunk_end_state"], str) and obj["chunk_end_state"].strip(),
@@ -100,14 +101,31 @@ def merge(tracker: dict, delta: dict, chunk_idx: int) -> dict:
 
 
 def merge_collisions(tracker: dict, delta: dict) -> list[str]:
-    """New stand-ins already assigned to a different character (case-insensitive)."""
+    """New stand-ins already assigned to a different character (in the tracker or earlier in this delta),
+    and stand-in changes for a known character, which merge ignores (case-insensitive)."""
     used = {_norm(c["standin"]): c["name"] for c in tracker["characters"]}
+    known = {_norm(c["name"]): c for c in tracker["characters"]}
     out = []
     for c in delta["new_characters"]:
+        old = known.get(_norm(c["name"]))
+        if old:
+            if _norm(old["standin"]) != _norm(c["standin"]):
+                out.append(f"{old['name']} already uses '{old['standin']}'; the new stand-in "
+                           f"'{c['standin']}' is ignored")
+            continue
         owner = used.get(_norm(c["standin"]))
         if owner and _norm(owner) != _norm(c["name"]):
             out.append(f"'{c['standin']}' ({c['name']}) is already used for {owner}")
+        used.setdefault(_norm(c["standin"]), c["name"])
     return out
+
+
+def progress(rows, idx: int) -> str:
+    """The tracker's Progress line after chunk idx: the cumulative chapter range."""
+    last = next(r for r in rows if r["idx"] == idx)
+    start, end = rows[0]["chapter_start"], last["chapter_end"]
+    span = f"Chapter {start}" if start == end else f"Chapters {start}–{end}"
+    return f"Part 1, Chunk {idx} — {span} processed so far"
 
 
 def _items(lines):

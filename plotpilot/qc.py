@@ -11,7 +11,7 @@ import anthropic
 
 from plotpilot import config, db, tracker
 from plotpilot.llm import LLMError, log_error
-from plotpilot.parse import (ParseError, check_rewrite, count_sentences, first_sentence, parse_audit,
+from plotpilot.parse import (ParseError, check_rewrite, count_sentences, first_sentence, parse_audit, parse_draft,
                              parse_factcheck)
 from plotpilot.pipeline import TEXT_KINDS, narration_state
 from plotpilot.prompts import fill
@@ -131,9 +131,11 @@ def _tracker_gate(c):
         if old == bound:
             continue
         m = re.match(rf"{re.escape(c.slug)}\.chunk-(\d+)\.delta-(\d+)\.pending\.json$", old.name)
-        if m and int(m[1]) == c.idx:
+        if not m:
+            continue  # not a file this pipeline wrote
+        if int(m[1]) == c.idx:
             try:
-                edited = json.loads(old.read_text(encoding="utf-8")) != _pass_delta(c, int(m[2]))
+                edited = json.loads(old.read_text(encoding="utf-8-sig")) != _pass_delta(c, int(m[2]))
             except (ValueError, ParseError):
                 edited = True
             if edited:
@@ -159,32 +161,42 @@ def _accept_tracker(c) -> bool:
         print(f"Pending file {bound} not found; re-run without --accept-tracker to regenerate it.")
         return False
     try:
-        delta = tracker.validate_delta(json.loads(bound.read_text(encoding="utf-8")))
+        delta = tracker.validate_delta(json.loads(bound.read_text(encoding="utf-8-sig")))
     except (ValueError, ParseError) as e:
         print(f"Pending file {bound} is invalid: {e}")
         return False
     merged = tracker.merge(_current_tracker(c), delta, c.idx)
     if c.first:
         state = narration_state(c.conn, c.chunk["id"])
-        merged["chunk1"] = {"margin": state.margin, "margin_sentences": count_sentences(state.margin),
+        merged["chunk1"] = {"margin": state.margin, "margin_sentences": _margin_sentences(c, state.margin),
                             "target": first_sentence(state.body)}
     db.add_tracker_version(c.conn, c.novel_id, c.chunk["id"], json.dumps(merged, ensure_ascii=False),
                            json.dumps(delta, ensure_ascii=False), new_status="done")
     bound.unlink()
-    _write_mirror(c, merged)
+    write_mirror(c.conn, c.novel_id, c.slug, c.title)
     print(f"Tracker updated for chunk {c.idx}.")
     return True
 
 
-def _write_mirror(c, merged):
-    rows = db.chunks(c.conn, c.novel_id)
-    overrides = c.conn.execute(
+def _margin_sentences(c, margin) -> int:
+    """The margin length as the AI wrote it (spec); counted only when a repair or edit changed the margin."""
+    d = parse_draft(db.latest_pass(c.conn, c.chunk["id"], "draft")["output_text"])
+    return d.margin_sentences if " ".join(d.margin.split()) == " ".join(margin.split()) else count_sentences(margin)
+
+
+def write_mirror(conn, novel_id, slug, title):
+    """Rewrite trackers/<slug>.md from the latest accepted version (a derived, read-only file)."""
+    latest = db.latest_tracker_row(conn, novel_id)
+    if not latest:
+        return
+    rows = db.chunks(conn, novel_id)
+    overrides = conn.execute(
         "SELECT c.idx, p.note FROM passes p JOIN chunks c ON c.id = p.chunk_id"
-        " WHERE p.novel_id = ? AND p.kind = 'factcheck_override' ORDER BY p.id", (c.novel_id,)).fetchall()
-    text = tracker.render(merged, title=c.title, chunks=[(r["idx"], r["label"]) for r in rows],
-                          progress=f"Part 1, Chunk {c.idx} — {c.chunk['label']} processed so far",
+        " WHERE p.novel_id = ? AND p.kind = 'factcheck_override' ORDER BY p.id", (novel_id,)).fetchall()
+    text = tracker.render(json.loads(latest["json"]), title=title, chunks=[(r["idx"], r["label"]) for r in rows],
+                          progress=tracker.progress(rows, latest["idx"]),
                           overrides=[(r["idx"], r["note"]) for r in overrides])
-    path = Path(config.TRACKER_DIR) / f"{c.slug}.md"
+    path = Path(config.TRACKER_DIR) / f"{slug}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 

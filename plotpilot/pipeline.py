@@ -129,10 +129,9 @@ class ChunkRun:
             return config.EMPTY_TRACKER
         raw = db.latest_tracker(self.conn, self.novel_id)
         rows = db.chunks(self.conn, self.novel_id)
-        prev = rows[self.idx - 2]
         return tracker.render(json.loads(raw) if raw else tracker.empty(), title=self.title,
                               chunks=[(r["idx"], r["label"]) for r in rows],
-                              progress=f"Part 1, Chunk {prev['idx']} — {prev['label']} processed so far")
+                              progress=tracker.progress(rows, self.idx - 1))
 
     def attempt(self, kind, model, user, parse, *, system=None, max_tokens, module=None, note=None,
                 status_for=None, retry_max_tokens=False):
@@ -271,6 +270,9 @@ def _check_done_chunks(conn, novel_id, slug, out_dir):
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(want, encoding="utf-8")
+        elif norm_ws(path.read_text(encoding="utf-8")) in stale_renderings(conn, row["id"]) - {norm_ws(want)}:
+            path.write_text(want, encoding="utf-8")
+            print(f"Note: {path.name} matched an earlier stored version and was rewritten from the stored text.")
         elif norm_ws(path.read_text(encoding="utf-8")) != norm_ws(want):
             print(f"WARNING: {path.name} was edited after its tracker was merged; the edit is ignored and "
                   "the stored text is used for assembly. Delete the file to restore the stored text.")
@@ -281,6 +283,7 @@ def run_novel(conn, llm, prompts, novel_id, slug, title, *, module, redraft, rep
     from plotpilot import qc
 
     _check_done_chunks(conn, novel_id, slug, out_dir)
+    qc.write_mirror(conn, novel_id, slug, title)  # derived; also repairs a crash before the last mirror write
     rows = db.chunks(conn, novel_id)
     chunk1_done = rows[0]["status"] == "done"
     flags = dict(module=module, redraft=redraft, repair=repair, accept=accept, accept_tracker=accept_tracker)

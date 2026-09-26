@@ -30,7 +30,7 @@ def test_validate_delta_accepts_spec_shape():
     lambda d: d.pop("new_terms"),
     lambda d: d.update(extra=[]),
     lambda d: d["new_characters"][0].update(stand_in=d["new_characters"][0].pop("standin")),
-    lambda d: d["new_terms"][0].update(chunk="7"),
+    lambda d: d["new_terms"][0].update(chunk=7.5),
     lambda d: d.update(chunk_end_state=""),
     lambda d: d.update(new_comparisons="x"),
 ])
@@ -87,3 +87,26 @@ def test_render_prompt_and_mirror():
     assert '"Nobody cared."' in prompt and "override" not in prompt.lower()
     mirror = render(t, title="Book", chunks=chunks, progress="x", overrides=[(1, "paraphrase ok")])
     assert "Fact-check overrides (operator)" in mirror and "Chunk 1: paraphrase ok" in mirror
+
+
+# --- deferred minors (Phase 4) --------------------------------------------------
+
+def _delta(chars, chunk=1):
+    return {"new_characters": [{"name": n, "standin": s} for n, s in chars],
+            "new_terms": [{"term": "Mana", "meaning": "magic", "chunk": chunk}], "new_comparisons": [],
+            "new_texture_motifs": [], "chunk_end_state": "x", "nickname_collisions": []}
+
+
+def test_collisions_within_one_delta():
+    out = merge_collisions(empty(), _delta([("Bo", "the rookie"), ("Cy", "The Rookie")]))
+    assert out == ["'The Rookie' (Cy) is already used for Bo"]
+
+
+def test_standin_change_for_existing_character_is_reported():
+    t = merge(empty(), _delta([("Aria Vale", "the captain")]), 1)
+    out = merge_collisions(t, _delta([("aria vale", "my boss")]))
+    assert out == ["Aria Vale already uses 'the captain'; the new stand-in 'my boss' is ignored"]
+
+
+def test_term_chunk_as_string_is_accepted():
+    assert validate_delta(_delta([], chunk="2"))
