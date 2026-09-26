@@ -65,7 +65,7 @@ Add a new top-level package, `imagesync/`, with its own CLI (`imagesync.py`) and
 - `plotpilot.llm` (the client wrapper, model check, `count_tokens`, `context_limit` and the usage log);
 - `plotpilot.prompts.fill` and a generalized loader (see IS-1);
 - `tests/fakes.py`;
-- **one new read-only PlotPilot function, `plotpilot.final.derive_outputs(conn, novel_id)`.** It returns `(hook, bodies, scenes_per_chunk, script, metadata_lines)`, exactly as `run_final` computes them.
+- **two new read-only PlotPilot functions, `plotpilot.final.derive_inputs` and `derive_outputs`.** `derive_outputs(conn, novel_id)` returns `(hook, bodies, scenes_per_chunk, script, metadata_lines)`, exactly as `run_final` computes them (see IS-1 for the split).
 
 **How `derive_outputs` works:**
 - Today `run_final` builds these inputs inline:
@@ -73,7 +73,7 @@ Add a new top-level package, `imagesync/`, with its own CLI (`imagesync.py`) and
   - the hook, from the `hook` pass followed by the newer `hook_tts` pass;
   - the target, from the tracker;
   - the scenes, from each chunk's latest ok `scenes` pass.
-- IS-1 extracts that derivation into `derive_outputs`, and `run_final` calls it too. Both tools therefore share one source of the script and timestamps, with no reimplementation to drift apart.
+- IS-1 extracts that derivation. `run_final` uses `derive_inputs` before the hook passes exist and `derive_outputs` after them. Both tools therefore share one source of the script and timestamps, with no reimplementation to drift apart.
 - `scene_lines` is called **once, novel-wide**, and its output is split by each chunk's scene count. Calling it per chunk would stamp every chunk's first scene `[00:00]` and reset the cursor.
 
 **How imagesync reads PlotPilot:**
@@ -186,7 +186,7 @@ manifest.csv (code) → continuity delta → [Bible review gate] → next chunk
 
 **Beat identity.**
 - Beats are keyed internally by `(chunk_idx, scene_index, suffix)`.
-- `beat_<M-SS>.png` and `--revise-beat M-SS` rely on timecodes being unique. `source.py` therefore **refuses duplicate scene timestamps** (R22's unfound-scene fallback can produce them), with an error naming both scenes. This keeps the v3 filename convention exact.
+- `beat_<M-SS>.png` and `--revise-beat M-SS` rely on timecodes being unique. R22's unfound-scene fallback can produce duplicates. **Pending Q9:** either `source.py` refuses them with an error naming both scenes and the remedy (keeping v3's naming exact), or it disambiguates filenames (the recommendation).
 
 **Chunk states and transitions.** Each transition is one atomic write: a pass, a status, and a Bible version where noted.
 
@@ -231,7 +231,7 @@ manifest.csv (code) → continuity delta → [Bible review gate] → next chunk
 
   `run_final` keeps its exact order of calls and gates, so its behaviour doesn't change.
 - **`source.py`:** read-only access, the readiness check, the sha binding, and the duplicate-timestamp refusal.
-- **`imagesync.db` schema:** includes `add_bible_version` and `UNIQUE`.
+- **`imagesync.db` schema:** includes `add_bible_version` and `UNIQUE(source_pass_id)`.
 - **CLI and style lock gate:** add the CLI (`--novel path.txt`, with the slug derived as PlotPilot derives it) and the style lock gate.
 - **Tests:** shared test helpers, and a conftest client guard for `imagesync.cli`.
 
@@ -251,7 +251,7 @@ imagesync/compose.py         Stage 2 composition + QA + manifest (pure; suffix p
 imagesync/pipeline.py        stage order, gates, resume
 imagesync/config.py          models, batch size, paths
 prompts/image-sync-v3.md     the spec, incl. suffix/sub-style/colour sections and output contracts
-plotpilot/final.py           + derive_outputs(conn, novel_id); run_final calls it (no behaviour change)
+plotpilot/final.py           + derive_inputs / derive_outputs; run_final uses them in its existing order (no behaviour change)
 plotpilot/prompts.py         load_prompts(path, heading_re, key) — backward compatible, fail closed
 tests/helpers.py             shared cwd/run/all_done/hook_reply (moved from test_final.py)
 tests/conftest.py            + guard imagesync.cli.make_client
@@ -274,7 +274,7 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
    - it refuses an unfinished novel, a missing database, and duplicate scene timestamps;
    - it never writes (a checksum of the file before and after);
    - after PlotPilot's database is rebuilt, it refuses on the sha mismatch.
-4. **Schema and atomicity:** `add_pass(new_status=)` and `add_bible_version(new_status=)` are atomic, and `UNIQUE(novel_id, chunk_idx, stage)` rejects a replayed version.
+4. **Schema and atomicity:** `add_pass(new_status=)` and `add_bible_version(new_status=)` are atomic. `UNIQUE(source_pass_id)` rejects a replayed accept of the same pass, and a second `refs` version for the same chunk from a new pass is accepted.
 5. **Style lock gate:**
    - without flags, it prints the suggestion and exits 0;
    - with flags, it stores the `style_lock` version;
