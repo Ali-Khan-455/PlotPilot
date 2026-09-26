@@ -424,7 +424,11 @@ The finished sequence should feel like one illustrator worked the whole video â€
 
 ## TOOL OUTPUT CONTRACTS (appendix)
 
-These contracts define the JSON shapes the Image-Sync tool expects from each stage. They are not part of the prompt the model sees; they are the code-facing validation schema. The prompt text above is authoritative for behavior; this appendix is authoritative for data shape.
+These contracts define the JSON shapes the Image-Sync tool expects from each stage.
+
+### How the model uses these contracts
+
+These contracts are appended to each stage's user message by the tool. When appended, they replace the markdown output format described in that stage's prompt. Output ONLY valid JSON matching the schema below. Ignore the markdown format described above. Fields not in the schema are ignored â€” do not include them.
 
 **Stage 0 output:**
 ```
