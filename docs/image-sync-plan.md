@@ -94,7 +94,12 @@ Add a new top-level package, `imagesync/`, with its own CLI (`imagesync.py`) and
 
 This follows the `tracker_versions` precedent (R21).
 
-- **Storage:** `bible_versions(id, novel_id, chunk_idx, stage, json, delta, accepted_at)` with **`UNIQUE(novel_id, chunk_idx, stage)`**, where `stage` is one of `style_lock`, `refs` or `continuity`. Revisions are not new versions: they are appended to the revision log inside the next version.
+- **Storage:** `bible_versions(id, novel_id, chunk_idx, stage, source_pass_id, json, delta, accepted_at)`, where `stage` is one of `style_lock`, `refs` or `continuity`.
+- **Replay protection:** `source_pass_id INTEGER NOT NULL UNIQUE REFERENCES passes(id)` is the refs or delta pass being accepted, as R21's pending file is bound to `delta-<pass_id>`.
+  - A replayed accept of the same pass is refused.
+  - A new pass after `--regenerate` or `--revise-beat` can be accepted, so a chunk may legitimately hold several `refs` or `continuity` versions.
+  - The newest version wins (`ORDER BY id DESC`, like `db.latest_tracker_row`).
+- **Revisions:** they are passes. The render folds any revision passes newer than the latest version into the revision log, so a revision to the last chunk after `done` still reaches the Bible and its mirror. The next accepted version then carries them.
 - **Atomic write:** `db.add_bible_version(..., new_status=)` inserts the version row, a pass row and the chunk status in **one transaction**, as `add_tracker_version` does.
 - **Merge:** deterministic, in a pure module `imagesync/bible.py`. It never deletes. It appends a superseded state as a new continuity entry. It assigns slots in order of first appearance and marks overflow as `fallback`. It rejects a duplicate `#Tag` and keeps both the original and transliterated names.
 - **Mirror:** `bibles/<slug>.md`, rendered in exactly v3's `=== VISUAL BIBLE ===` block layout and regenerated on every run. It is read-only. The layout mirrors the spec's headings, like R21's tracker render; the field labels come from the spec block.
@@ -198,6 +203,10 @@ manifest.csv (code) → continuity delta → [Bible review gate] → next chunk
 | any state after `beats` | `--revise-beat` with no new `@Name` | unchanged | revision pass; affected prompt re-emitted if already batched |
 | any state after `beats` | `--revise-beat` introducing a new element | `beats` | revision pass. Stage 1 re-runs for the new element only, so the chunk re-enters the reference gate rather than dead-ending at the batch pre-check. |
 
+**Revision ordering.** Chunks run strictly in order, as in PlotPilot, and chunk N+1's Stage 1 reads chunk N's Bible. So a `--revise-beat` on chunk N:
+- that needs no new element is allowed at any time;
+- that introduces a new element is **refused once chunk N+1 has left `ready`**. The error says so and suggests revising the beat in the later chunk instead.
+
 **Stage 2 composition** is split between the model and code:
 - **The model returns** `{timecode, shot_type, scene, refs[], genre_override|null}`.
 - **Code builds the final prompt:** `"{shot}, {scene}, {@refs}, {suffix}"`. The suffix is the spec's locked-suffix section, with the sub-style descriptor and colour treatment (also loaded from the spec) and the aspect from the Bible.
@@ -209,14 +218,18 @@ manifest.csv (code) → continuity delta → [Bible review gate] → next chunk
 |---|---|---|
 | **IS-1 Foundation** | See the IS-1 detail below the table. | A manifest of chunks prints. The style lock gate works. The recomputed metadata lines equal PlotPilot's file byte for byte. `run_final` is unchanged in behaviour (its tests pass). |
 | **IS-2 Stage 0** | The beats call, beat validation (the scene-list subset, a/b suffixes, order, source tags, `CONTINUES` only on beat 1 and only when the previous chunk's final continuity entry is an open scene), the cadence warning, and `--revise-beat` before Stage 2. | Chunk 1 beats are stored and a rerun makes no calls. Every hard rule has a failing-then-passing test. |
-| **IS-3 Bible + Stage 1** | `bible.py` (schema, merge, render in exact v3 layout), slots and fallback, unique tags with transliteration, `add_bible_version`, the Stage 1 call, `refs.txt`, the approval gate, `--regenerate`, and the mirror. | Two-chunk test: chunk 2 doesn't re-create chunk 1's references, overflow gets `fallback`, the render matches the v3 block, and a replayed accept is refused by `UNIQUE`. |
+| **IS-3 Bible + Stage 1** | `bible.py` (schema, merge, render in exact v3 layout), slots and fallback, unique tags with transliteration, `add_bible_version`, the Stage 1 call, `refs.txt`, the approval gate, `--regenerate`, and the mirror. | Two-chunk test: chunk 2 doesn't re-create chunk 1's references, overflow gets `fallback`, the render matches the v3 block, and a replayed accept of the same pass is refused by `UNIQUE(source_pass_id)`. `--regenerate` after approval re-approves cleanly. |
 | **IS-4 Stage 2** | The batch pre-check, per-batch calls, composition in code with the spec-loaded suffix, QA (shot cadence, aspect, refs; red-X and text rules only as far as they can be checked), a retry per batch, batch files, `manifest.csv`, the continuity delta, the review gate, and `CONTINUES` framing. | A two-chunk run ends at `done`. The suffix is byte-equal to the spec section on every prompt. A crash between batches resumes at the next one. |
-| **IS-5 Revisions + image check** | `--revise-beat` after Stage 2 (re-emit one prompt, or re-enter the reference gate for a new element). `--check-images` compares `beat_*.png` against the manifest. | Every transition in the table has a test. The image report is correct. |
+| **IS-5 Revisions + image check** | `--revise-beat` after Stage 2 (re-emit one prompt, or re-enter the reference gate for a new element). `--check-images` compares `beat_*.png` against the manifest. | Every transition in the table has a test, including a revise-beat with a new element that reaches `done` a second time. The image report is correct. |
 
 **IS-1 in detail:**
 - **Docs:** amend CLAUDE.md and `docs/architecture-audit.md` (Q0).
 - **Prompt loader:** generalize `load_prompts(path, heading_re, key=…)`. Sections without COPY/END markers must **fail closed** for the required keys, not be skipped silently.
-- **PlotPilot extraction:** move `plotpilot.final.derive_outputs` out of `run_final`.
+- **PlotPilot extraction:** move `plotpilot.final.derive_outputs` out of `run_final`. `run_final` needs the bodies and the target *before* any hook pass exists, so the derivation is split in two:
+  - `derive_inputs(conn, novel_id) -> (states, bodies, target)`, used by `run_final` from the start;
+  - `derive_outputs(conn, novel_id)`, which calls `derive_inputs` and then adds the hook, script and metadata lines. It is only valid once the `hook_tts` pass exists; `source.py`'s readiness check guarantees that.
+
+  `run_final` keeps its exact order of calls and gates, so its behaviour doesn't change.
 - **`source.py`:** read-only access, the readiness check, the sha binding, and the duplicate-timestamp refusal.
 - **`imagesync.db` schema:** includes `add_bible_version` and `UNIQUE`.
 - **CLI and style lock gate:** add the CLI (`--novel path.txt`, with the slug derived as PlotPilot derives it) and the style lock gate.
@@ -304,4 +317,4 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
 - **Q6 — Models.** Stage 0 and Stage 2 need judgment, so the plan uses GEN (Sonnet). Could Stage 1 or the Bible delta use QC (Haiku)? This only affects cost.
 - **Q7 — Sub-style choice.** Is a suggestion from PlotPilot's dominant module, which you confirm, the right approach? Or do you always pick the sub-style yourself?
 - **Q8 — Bible review gate.** Should the end-of-chunk `--accept-bible` gate be mandatory, as with the tracker gate? Or can the continuity delta merge automatically, since its entries come from beats you already reviewed at the reference gate?
-- **Q9 — Duplicate scene timestamps.** The plan refuses them. The alternative is to disambiguate filenames (e.g. `beat_04-15.png` then `beat_04-15_2.png`), which departs from v3's convention. Which do you prefer?
+- **Q9 — Duplicate scene timestamps.** They come from R22's fallback for an unfound scene. The plan refuses them, but that refusal has **no in-place remedy**: done PlotPilot chunks are frozen, scenes don't re-run without a body change, and Prompt 5 has no redo. The only way out would be rebuilding `plotpilot.db`, and the error would say so. The alternative is to disambiguate filenames (`beat_04-15.png`, `beat_04-15_2.png`), which keeps such novels usable but departs from v3's naming convention. Which do you prefer? (Recommendation: disambiguate, since refusing strands a finished novel.)
