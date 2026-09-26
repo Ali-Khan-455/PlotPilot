@@ -35,6 +35,7 @@ class Source:
     script_sha: str             # sha256 of the derived script + metadata lines
     script_words: int
     chunks: list
+    hook: str                  # the video's actual opening line; chunk 1's Stage 0 input needs it (IS-D10)
 
 
 def open_plotpilot(path) -> sqlite3.Connection:
@@ -83,4 +84,4 @@ def _load(conn, slug) -> Source:
               for r, body, lines in zip(rows, out.bodies, out.chunk_lines)]
     script_sha = hashlib.sha256((out.script + "\0" + "\n".join(out.lines)).encode("utf-8")).hexdigest()
     return Source(novel["id"], novel["title"], novel["source_sha256"], script_sha, len(out.script.split()),
-                  chunks)
+                  chunks, out.hook)

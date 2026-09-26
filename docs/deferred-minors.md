@@ -2,6 +2,11 @@
 
 Minor findings from each phase's final code review. They were deliberately left out of that phase's fix pass: none of them corrupts output or loses data. Fix them whenever it's convenient, write a failing test first, and delete the entry once it's fixed.
 
+## Image-Sync IS-2 — Stage 0 (beats)
+
+- [ ] **No test exercises `current_beats`'s length-mismatch guard** (`imagesync/pipeline.py::current_beats`). The `len(raw_items) == len(identity)` assertion (a corrupted `note`/`output_text` pair) has no test forcing a mismatch to confirm it raises `ParseError` rather than silently truncating via `zip`.
+- [ ] **`_context_for` consolidates what the plan wrote as two separate, identically-worded inline blocks** (in `run_stage0` and `run_revise`) into one shared helper. Functionally equivalent and verified against the plan's invariants (chunk 1 never computes `rows[-1]`), but it's a structural deviation from the plan's literal text worth noting for anyone diffing against it later.
+
 ## Image-Sync IS-1 — Foundation
 
 - [ ] **A non-PlotPilot database or an unreadable spec crashes with a traceback** (`imagesync/source.py`, `imagesync/cli.py`). An empty file gives `no such table: novels`, a non-SQLite file gives `file is not a database` (for example `--plotpilot-db imagesync.db`), and a missing spec gives `FileNotFoundError`. Catch `sqlite3.DatabaseError` in `open_plotpilot`/`load_novel`, and `OSError` around `load_spec`, and turn them into clear errors.

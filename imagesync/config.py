@@ -3,6 +3,8 @@ lookup keys into prompts/image-sync-v3.md, never prompt text."""
 
 from pathlib import Path
 
+from plotpilot import config as pp_config
+
 PLOTPILOT_DB = "plotpilot.db"
 DB_PATH = "imagesync.db"
 SPEC_PATH = Path(__file__).resolve().parent.parent / "prompts" / "image-sync-v3.md"
@@ -14,3 +16,7 @@ DEFAULT_ASPECT = "16:9"
 MODULE_TO_SUBSTYLE = {"A": "c", "B": "b", "C": "a", "D": "d"}
 MODULE_TO_COLOR = {"A": "Isekai/power fantasy", "B": "Romance/drama", "C": "Dark action/revenge",
                    "D": "Comedy/slice of life"}
+
+# Each beat restates its slice of the chunk's narration, so this needs to be draft-sized, not a smaller
+# custom constant.
+BEATS_MAX_TOKENS = pp_config.GEN_MAX_TOKENS

@@ -94,3 +94,27 @@ def latest_bible(conn, novel_id):
     """The newest accepted Visual Bible version, or None."""
     return conn.execute("SELECT * FROM bible_versions WHERE novel_id = ? ORDER BY id DESC LIMIT 1",
                         (novel_id,)).fetchone()
+
+
+def chunks(conn, novel_id):
+    """(id, idx, status) rows, ordered by idx."""
+    return conn.execute("SELECT id, idx, status FROM chunks WHERE novel_id = ? ORDER BY idx",
+                        (novel_id,)).fetchall()
+
+
+def latest_pass(conn, chunk_id, kind, after_id=None):
+    """Newest ok pass (verdict IS NULL), optionally newer than after_id."""
+    return conn.execute(
+        "SELECT id, output_text, note FROM passes WHERE chunk_id = ? AND kind = ?"
+        " AND verdict IS NULL AND id > ? ORDER BY id DESC LIMIT 1",
+        (chunk_id, kind, after_id or 0)).fetchone()
+
+
+def ok_passes(conn, chunk_id, kinds, after_id=None):
+    """All ok passes (verdict IS NULL) of the given kinds, oldest first. Unlike PlotPilot's own
+    ok_passes, this also selects `note` — a beat_revision pass's persisted identity JSON lives there."""
+    marks = ",".join("?" * len(kinds))
+    return conn.execute(
+        f"SELECT id, kind, output_text, note FROM passes WHERE chunk_id = ? AND verdict IS NULL"
+        f" AND kind IN ({marks}) AND id > ? ORDER BY id",
+        (chunk_id, *kinds, after_id or 0)).fetchall()

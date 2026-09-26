@@ -1,5 +1,6 @@
 """Plain helpers shared by PlotPilot's final-stage tests and the Image-Sync tests (no fixtures here;
 the `cwd` fixture lives in conftest.py so nothing imports it by name)."""
+import json
 import sqlite3
 
 import plotpilot.config as config
@@ -72,3 +73,10 @@ def metadata(cwd):
 def kinds(*ks):
     marks = ",".join("?" * len(ks))
     return q(f"SELECT kind, model, module, verdict FROM passes WHERE kind IN ({marks}) ORDER BY id", *ks)
+
+
+def beats_reply(scenes, continues=None):
+    """A scripted valid Stage 0 reply: one beat per (timecode, description) in `scenes`."""
+    return json.dumps({"beats": [{"timecode": tc, "narration": f"narration for {tc}", "detail": [],
+                                  "continues": continues if i == 0 else None}
+                                 for i, (tc, _) in enumerate(scenes)]})
