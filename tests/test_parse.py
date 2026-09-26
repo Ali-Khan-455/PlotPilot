@@ -390,7 +390,7 @@ def test_rewrite_accepts_dash_cliffhanger():
 
 def test_factcheck_step_headers_are_not_flags():
     text = ("**Step 2: PRESENT / MISSING check**\n- The guard reveals the map: MISSING\n"
-            "- \"I flew.\" INVENTED\nFinal verdict: FAIL")
+            "## Step 3 — INVENTED lines\n- \"I flew.\" INVENTED\nFinal verdict: FAIL")
     assert parse_factcheck(text).flags == ["- The guard reveals the map: MISSING", '- "I flew." INVENTED']
 
 
@@ -424,3 +424,8 @@ def test_abbreviations_do_not_end_sentences(text, n):
 
 def test_first_sentence_skips_abbreviations():
     assert first_sentence("Mr. Smith hired me. I farmed.") == "Mr. Smith hired me."
+
+
+def test_check_margin_splits_like_count_sentences():
+    assert check_margin("But Mr. Smith was kind.") == "sentence starts with 'But'"
+    assert check_margin("I met Mr. But was fine.") is None  # "But" after "Mr." is not a sentence start

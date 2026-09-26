@@ -51,7 +51,8 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
             tokens = llm.count_tokens(gen_model, user, system)
         except anthropic.BadRequestError as e:
             # The counting endpoint may refuse an oversize request itself; any other 400 is surfaced as is.
-            if not re.search(r"(?i)too long|context|exceed", str(e)):
+            if not re.search(r"(?i)prompt is too long|context (?:window|length)|exceeds? the (?:maximum|context)",
+                             str(e)):
                 raise
             tokens, reason = estimate_tokens(len(user.split()) + len(system.split())), f" (API: {e})"
             limit = -1

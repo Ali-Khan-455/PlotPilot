@@ -299,3 +299,9 @@ def test_same_heading_rules():
     assert same_heading("Prologue", "Prologue: The Storm")
     assert not same_heading("Prologue (V for Vendetta)", "Prologue (for Vendetta)")
     assert same_heading("Chapter 3 ..... 17", "CHAPTER III")
+
+
+def test_possessive_prose_is_not_a_heading():
+    text = novel("Chapter 1", "Chapter 2") + ("\nChapter 2's ending was sad, I thought.\n"
+                                              "\nChapter Seven's rules were strict.\n")
+    assert headings(text) == ["Chapter 1", "Chapter 2"]

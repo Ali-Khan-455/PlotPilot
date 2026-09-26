@@ -111,7 +111,7 @@ def merge_collisions(tracker: dict, delta: dict) -> list[str]:
         if prev is not c:
             if _norm(prev["standin"]) != _norm(c["standin"]):
                 out.append(f"{c['name']} appears twice in this delta ('{prev['standin']}', '{c['standin']}'); "
-                           f"only '{prev['standin']}' is kept")
+                           "the second is ignored")
             continue
         old = known.get(_norm(c["name"]))
         if old:

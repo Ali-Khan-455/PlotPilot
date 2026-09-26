@@ -39,14 +39,15 @@ NUM_WORDS = {
 }
 _NW = "|".join(sorted(NUM_WORDS, key=len, reverse=True))
 _ROMAN = r"(?=[ivxlcdm])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"  # valid numerals only
-# After the number (any of the three forms) the line must end, or continue with : . - – — , ( [ or a
-# quote, or with a word that starts with an uppercase letter ("Chapter 1 The Beginning"). So prose such
+# After the number (any of the three forms) the line must end, or continue with : . - – — , or with a
+# space and then ( [ an opening quote or a word that starts with an uppercase letter ("Chapter 1 The
+# Beginning"). The space keeps possessives ("Chapter 2's ending") out. So prose such
 # as "Chapter 12 of the regulations forbade it." is not a heading. The group is atomic so "Twenty-One
 # of them" can't backtrack to "Twenty" + "-One of them".
 CHAPTER_RE = re.compile(
     r"^[ \t]*(?:chapter|ch\.)[ \t]*"
     rf"(?P<num>(?>\d+|{_ROMAN}|(?:{_NW})(?:[- ](?:and[- ])?(?:{_NW}))*))"
-    r"""\b(?=[^\S\n]*(?:$|[:.\-—–,(\["'“‘])|[^\S\n]+(?-i:[A-Z]))[^\n]{0,80}$""",
+    r"""\b(?=[^\S\n]*(?:$|[:.\-—–,])|[^\S\n]+(?:[(\["'“‘]|(?-i:[A-Z])))[^\n]{0,80}$""",
     re.I,
 )
 SMALL_PRINT_RE = re.compile(r"^\*END\*THE SMALL PRINT", re.I)

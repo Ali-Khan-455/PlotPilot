@@ -239,3 +239,16 @@ def test_other_count_tokens_400_is_surfaced(cwd, capsys, monkeypatch):
     code, _ = all_done()
     out, errout = capsys.readouterr()
     assert code == 1 and "context window" not in out and "invalid content block" in errout
+
+
+def test_context_word_in_other_400_is_surfaced(cwd, capsys, monkeypatch):
+    import anthropic
+    import httpx2
+    req = httpx2.Request("POST", "https://api.anthropic.com")
+    err = anthropic.BadRequestError("context_management: unknown field", response=httpx2.Response(400, request=req),
+                                    body=None)
+    monkeypatch.setattr(FakeClient, "_count_tokens", lambda self, **k: (_ for _ in ()).throw(err))
+    capsys.readouterr()
+    code, _ = all_done()
+    out, errout = capsys.readouterr()
+    assert code == 1 and "context window" not in out and "context_management" in errout

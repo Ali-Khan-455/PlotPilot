@@ -114,7 +114,7 @@ def test_term_chunk_as_string_is_accepted():
 
 def test_same_name_twice_in_one_delta_with_different_standins():
     out = merge_collisions(empty(), _delta([("Bo", "the rookie"), ("Bo", "the kid")]))
-    assert out == ["Bo appears twice in this delta ('the rookie', 'the kid'); only 'the rookie' is kept"]
+    assert out == ["Bo appears twice in this delta ('the rookie', 'the kid'); the second is ignored"]
 
 
 def test_progress_reflects_a_split_chapter():
@@ -127,3 +127,10 @@ def test_progress_reflects_a_split_chapter():
     assert progress(rows, 3) == "Part 1, Chunk 3 — Chapters 1–6 processed so far"
     solo = [{"idx": 1, "label": "Ch 1 (part 1/3)", "chapter_start": 1, "chapter_end": 1}]
     assert progress(solo, 1) == "Part 1, Chunk 1 — part 1/3 of Chapter 1 processed so far"
+
+
+def test_duplicate_name_message_for_a_known_character():
+    t = merge(empty(), _delta([("Bo", "the kid")]), 1)
+    out = merge_collisions(t, _delta([("Bo", "the rookie"), ("Bo", "the boy")]))
+    assert out == ["Bo already uses 'the kid'; the new stand-in 'the rookie' is ignored",
+                   "Bo appears twice in this delta ('the rookie', 'the boy'); the second is ignored"]

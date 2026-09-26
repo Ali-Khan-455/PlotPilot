@@ -11,4 +11,4 @@ Minor findings from each phase's final code review. They were deliberately left 
 - [ ] **The deleted-margin check is narrow** (`pipeline.py`, `sync_file`). Deleting the margin and also editing the first body paragraph is not caught; that paragraph becomes the margin.
 - [ ] **A failing usage-log write masks the API error** (`llm.py`, `call`). If `_log_row` raises (unwritable `logs/`), the original exception is lost.
 - [ ] **`GUT_END_RE` matches any line starting "End of (the) Project Gutenberg"** (`ingest.py`), even mid-book. Negligible in real prose.
-
+- [ ] **A repeated failing `--redraft` over the same malformed file adds identical history rows** (`pipeline.py`). Each rerun stores the file again as a PARSE_FAILED `operator_edit`. Harmless (append-only).

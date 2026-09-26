@@ -11,7 +11,6 @@ COUNT_LINE_RE = re.compile(r"^[\s*_(]*margin is (\w+) sentences?[\s.*_)]*$", re.
 LEFTOVER_COUNT_RE = re.compile(r"\bmargin is\b[^\n]*\bsentences?\b", re.I)
 COUNT_WORDS = {w: n for n, w in enumerate(
     ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"], 1)}
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 HOOKY_PHRASES = ["little did", "what happened next", "unbeknownst", "before long"]
 
 
@@ -101,7 +100,7 @@ def check_margin(margin: str) -> str | None:
     for phrase in HOOKY_PHRASES:
         if phrase in low:
             return f"phrase '{phrase}'"
-    sentences = [s for s in SENTENCE_SPLIT_RE.split(margin.strip()) if s]
+    sentences = _sentences(margin)
     if count_sentences(margin) > 2:  # Prompt 3: 1–2 sentences (also re-checks a repaired margin)
         return "more than two sentences"
     for s in sentences:
@@ -196,8 +195,10 @@ def parse_factcheck(text: str) -> Factcheck:
             verdicts.extend(found)
             continue
         if re.search(r"\b(MISSING|INVENTED)\b", c):
-            if re.match(r"(?i)^\s*step \d+", c) and STEP_ECHO_RE.search(c):
-                continue  # an echoed instruction, not a flagged line
+            whole_header = line.lstrip().startswith("#") or re.fullmatch(r"\s*\*\*[^*]+\*\*\s*", line)
+            if re.match(r"(?i)^\s*step \d+", c) and (
+                    STEP_ECHO_RE.search(c) or (whole_header and not re.search(r'["“]', c))):
+                continue  # an echoed instruction or a whole-line step header, not a flagged line
             flags.append(line.strip())
     if not verdicts:
         raise ParseError("no PASS/FAIL verdict in the fact-check output")
@@ -250,6 +251,16 @@ def first_sentence(text: str) -> str:
     t = text.strip()
     m = SENTENCE_END_RE.search(t)
     return t[:m.end()] if m else t
+
+
+def _sentences(text: str) -> list[str]:
+    t, out, start = text.strip(), [], 0
+    for m in SENTENCE_END_RE.finditer(t):
+        out.append(t[start:m.end()].strip())
+        start = m.end()
+    if t[start:].strip():
+        out.append(t[start:].strip())
+    return [s for s in out if s]
 
 
 def count_sentences(text: str) -> int:
