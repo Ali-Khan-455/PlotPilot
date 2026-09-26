@@ -154,13 +154,13 @@ def test_override_ignored_when_not_failed(cwd, capsys):
 def test_audit_malformed_twice(cwd, capsys):
     code, _ = run("--module", "A", replies=[draft(), "junk", "junk"])
     assert code == 1 and status() == "drafted"
-    assert "audit output was malformed twice" in capsys.readouterr().out
+    assert "audit output was malformed twice" in capsys.readouterr().err
 
 
 def test_factcheck_malformed_twice(cwd, capsys):
     code, _ = run("--module", "A", replies=[draft(), AUDIT_CLEAN, "no verdict", "still none"])
     assert code == 1 and status() == "audited"
-    assert "fact-check output was malformed twice" in capsys.readouterr().out
+    assert "fact-check output was malformed twice" in capsys.readouterr().err
 
 
 def test_truncated_tts_retried_then_fails(cwd):
@@ -204,7 +204,7 @@ def test_file_without_blank_line_is_an_error(cwd, capsys):
     run("--module", "A", replies=[draft(), AUDIT_CLEAN, FAIL])
     chunk_path(cwd).write_text("one paragraph only, no margin separation, edited\n")
     code, _ = run()
-    assert code == 1 and "start with the margin as its own paragraph" in capsys.readouterr().out
+    assert code == 1 and "start with the margin as its own paragraph" in capsys.readouterr().err
 
 
 def test_legacy_single_space_file_is_stale(cwd, capsys):
@@ -312,7 +312,7 @@ def test_deleted_margin_paragraph_is_refused(cwd, capsys):
     capsys.readouterr()
     code, client = run()
     assert code == 1 and client.calls == [] and rows() == before
-    assert "margin paragraph seems to be deleted" in capsys.readouterr().out
+    assert "margin paragraph seems to be deleted" in capsys.readouterr().err
 
 
 def test_blank_line_with_spaces_splits_margin(cwd):
@@ -382,7 +382,7 @@ def test_redraft_recovers_from_a_malformed_file(cwd, capsys):
     chunk_path(cwd).write_text(f"{MARGIN} {BODY} but edited without a blank line.\n")
     capsys.readouterr()
     code, _ = run()
-    assert code == 1 and "delete the file to restore the stored text" in capsys.readouterr().out
+    assert code == 1 and "delete the file to restore the stored text" in capsys.readouterr().err
     code, _ = run("--redraft", replies=[draft("Second margin.")], auto_qc=True)
     assert code == 0 and chunk_path(cwd).read_text().startswith("Second margin.\n\n")
 
@@ -425,3 +425,43 @@ def test_redraft_records_a_malformed_file_first(cwd):
     run("--redraft", replies=[draft("Second margin.")], auto_qc=True)
     edits = [r for r in rows() if r[0] == "operator_edit"]
     assert len(edits) == 1 and edits[0][2] == "PARSE_FAILED" and edits[0][4] == "my malformed but precious text\n"
+
+
+# --- remaining deferred minors ------------------------------------------------------
+
+def test_errors_go_to_stderr(cwd, capsys):
+    run("--module", "A", replies=[draft(), "garbage", "garbage"])
+    out, err = capsys.readouterr()
+    assert "audit output was malformed twice" in err and "malformed twice" not in out
+
+
+def test_audit_log_written_before_the_row(cwd, monkeypatch):
+    import plotpilot.db as db
+    real = db.add_pass
+
+    def crash(*a, **k):
+        if a[3] == "audit" and k.get("verdict") is None:
+            raise RuntimeError("crash")
+        return real(*a, **k)
+    monkeypatch.setattr(db, "add_pass", crash)
+    with pytest.raises(RuntimeError):
+        run("--module", "A", replies=[draft(), AUDIT_CLEAN])
+    assert (cwd / "logs" / "book" / "chunk-01-audit.md").read_text() == AUDIT_CLEAN
+
+
+def test_deleted_margin_with_edited_first_paragraph_is_refused(cwd, capsys):
+    second = "A second paragraph follows here."
+    run("--module", "A", replies=[draft_paras(), AUDIT_CLEAN, PASS, BODY + "\n\n" + second])
+    chunk_path(cwd).write_text(BODY.replace("guard", "captain") + "\n\n" + second + "\n")
+    capsys.readouterr()
+    code, client = run()
+    assert code == 1 and client.calls == []
+    assert "margin paragraph seems to be deleted" in capsys.readouterr().err
+
+
+def test_repeated_failing_redraft_stores_the_file_once(cwd):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
+    chunk_path(cwd).write_text("malformed text\n")
+    run("--redraft", replies=["bad", "bad"])
+    run("--redraft", replies=["bad", "bad"])
+    assert [r for r in rows() if r[0] == "operator_edit"].__len__() == 1

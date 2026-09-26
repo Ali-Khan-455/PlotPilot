@@ -134,3 +134,13 @@ def test_duplicate_name_message_for_a_known_character():
     out = merge_collisions(t, _delta([("Bo", "the rookie"), ("Bo", "the boy")]))
     assert out == ["Bo already uses 'the kid'; the new stand-in 'the rookie' is ignored",
                    "Bo appears twice in this delta ('the rookie', 'the boy'); the second is ignored"]
+
+
+def test_progress_uses_labels():
+    from plotpilot.tracker import progress
+    rows = [{"idx": 1, "label": "Prologue–Ch 4", "chapter_start": 1, "chapter_end": 5},
+            {"idx": 2, "label": "Ch 5–Epilogue", "chapter_start": 6, "chapter_end": 7}]
+    assert progress(rows, 1) == "Part 1, Chunk 1 — Prologue–Chapter 4 processed so far"
+    assert progress(rows, 2) == "Part 1, Chunk 2 — Prologue–Epilogue processed so far"
+    rows = [{"idx": 1, "label": "Ch 10–12", "chapter_start": 1, "chapter_end": 3}]
+    assert progress(rows, 1) == "Part 1, Chunk 1 — Chapters 10–12 processed so far"

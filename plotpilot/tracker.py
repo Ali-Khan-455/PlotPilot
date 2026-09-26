@@ -126,22 +126,38 @@ def merge_collisions(tracker: dict, delta: dict) -> list[str]:
     return out
 
 
+def _ends(label: str) -> tuple[str, str]:
+    """First and last chapter names in a chunk label ('Ch 1–5' → ('1', '5'); 'Prologue–Ch 4')."""
+    core = re.sub(r"\s*\(part \d+/\d+\)$", "", label)
+    parts = [re.sub(r"^Ch ", "", p.strip()) for p in core.split("–")]
+    return parts[0], parts[-1]
+
+
+def _name(x: str) -> str:
+    return f"Chapter {x}" if x.isdigit() else x
+
+
+def _span(start: str, end: str) -> str:
+    if start == end:
+        return _name(start)
+    if start.isdigit() and end.isdigit():
+        return f"Chapters {start}–{end}"
+    return f"{_name(start)}–{_name(end)}"
+
+
 def progress(rows, idx: int) -> str:
-    """The tracker's Progress line after chunk idx: the cumulative chapter range."""
-    last = next(r for r in rows if r["idx"] == idx)
-    start, end = rows[0]["chapter_start"], last["chapter_end"]
+    """The tracker's Progress line after chunk idx: the cumulative range, in the book's own numbering."""
+    pos = next(i for i, r in enumerate(rows) if r["idx"] == idx)
+    last, start = rows[pos], _ends(rows[0]["label"])[0]
     part = re.search(r"\(part (\d+)/(\d+)\)", last["label"])
     if part and part[1] != part[2]:  # the last chapter is only partly done
-        end -= 1
-        partial = f"part {part[1]}/{part[2]} of Chapter {last['chapter_end']}"
-        span = partial if end < start else f"{_span(start, end)} and {partial}"
+        partial = f"part {part[1]}/{part[2]} of {_name(_ends(last['label'])[1])}"
+        done = [r for r in rows[:pos] if not re.search(r"\(part (\d+)/(\d+)\)", r["label"])
+                or re.search(r"\(part (\d+)/\1\)", r["label"])]
+        span = f"{_span(start, _ends(done[-1]['label'])[1])} and {partial}" if done else partial
     else:
-        span = _span(start, end)
+        span = _span(start, _ends(last["label"])[1])
     return f"Part 1, Chunk {idx} — {span} processed so far"
-
-
-def _span(start: int, end: int) -> str:
-    return f"Chapter {start}" if start == end else f"Chapters {start}–{end}"
 
 
 def _items(lines):

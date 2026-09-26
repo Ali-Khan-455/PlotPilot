@@ -121,7 +121,7 @@ def test_malformed_then_good_draft(cwd):
 def test_malformed_twice_fails(cwd, capsys):
     code, _ = run("--module", "A", replies=["bad", "still bad"])
     assert code == 1 and status() == "planned" and len(passes()) == 2
-    assert "malformed twice" in capsys.readouterr().out
+    assert "malformed twice" in capsys.readouterr().err
 
 
 def test_target_mid_body_twice_fails(cwd):

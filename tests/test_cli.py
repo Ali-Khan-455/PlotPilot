@@ -164,3 +164,32 @@ def test_header_comes_from_stored_plan_after_parser_change(cwd, capsys, monkeypa
     out = capsys.readouterr().out
     assert "Novel: n — 7 chapters, 700 words, 2 chunks" in out
     assert "the stored plan is used" in out
+
+
+# --- remaining deferred minors ------------------------------------------------------
+
+def test_no_headings_creates_no_database(cwd):
+    (cwd / "n.txt").write_text("just prose\n\nmore prose\n")
+    assert main(["--novel", "n.txt"]) == 1
+    assert not (cwd / config.DB_PATH).exists()
+
+
+def test_database_write_error_is_clean(cwd, capsys, monkeypatch):
+    import plotpilot.db as db
+    write_novel(cwd / "n.txt")
+    monkeypatch.setattr(db, "save_plan", lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError(
+        "attempt to write a readonly database")))
+    assert main(["--novel", "n.txt"]) == 1
+    assert "Cannot write the database" in capsys.readouterr().err
+
+
+def test_fresh_parse_warnings_suppressed_for_changed_parser(cwd, capsys, monkeypatch):
+    write_novel(cwd / "n.txt")
+    main(["--novel", "n.txt"], client=FakeClient(["B"]))
+    capsys.readouterr()
+    import plotpilot.cli as cli
+    from plotpilot.ingest import Parsed
+    monkeypatch.setattr(cli, "parse_novel", lambda text: Parsed([], short_chapters=[3], front_words=9))
+    main(["--novel", "n.txt"], client=FakeClient([]))
+    out = capsys.readouterr().out
+    assert "the stored plan is used" in out and "WARNING: dropped" not in out and "fewer than" not in out

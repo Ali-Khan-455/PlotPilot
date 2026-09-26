@@ -99,3 +99,14 @@ def test_context_limit_zero_is_not_missing_and_override_fallback_warns(tmp_path,
     client.models.retrieve = lambda _id: SimpleNamespace(id=_id)
     LLM(client, tmp_path).context_limit("claude-other")
     assert "context window of claude-other is unknown" in capsys.readouterr().out
+
+
+def test_usage_log_failure_does_not_mask_the_api_error(tmp_path, capsys):
+    from tests.fakes import connection_error
+    logs = tmp_path / "logs"
+    logs.write_text("a file, not a directory")  # makes the usage write fail
+    llm = LLM(FakeClient([connection_error()]), logs)
+    with pytest.raises(Exception) as e:
+        llm.call("draft", "m", "u", max_tokens=5, slug="n", chunk_idx=1)
+    assert "Connection" in type(e.value).__name__
+    assert "could not write usage.csv" in capsys.readouterr().err

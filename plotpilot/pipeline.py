@@ -1,6 +1,7 @@
 """Stages 2–3 for every chunk (module gate, draft; chunk 1 also margin check/repair), the narration
 state and file sync that QC (qc.py) builds on, and the chunk loop (run_novel)."""
 
+import difflib
 import json
 import re
 from dataclasses import dataclass, replace
@@ -9,7 +10,7 @@ from pathlib import Path
 import anthropic
 
 from plotpilot import config, db, tracker
-from plotpilot.llm import LLMError, log_error
+from plotpilot.llm import LLMError, eprint, log_error
 from plotpilot.parse import (ParseError, _normalize, check_margin, first_sentence, parse_continuation,
                              parse_draft, parse_module, parse_repair)
 from plotpilot.prompts import fill
@@ -72,6 +73,16 @@ def _apply(state, kind, output, first):
         margin, body = split_file(output, first)
         return replace(state, margin=margin, body=body)
     return replace(state, body=output.strip())  # texture, tts
+
+
+def _looks_like_body(margin: str, state) -> bool:
+    """The new first paragraph is (an edit of) body narration rather than of the margin: the margin
+    paragraph was probably deleted."""
+    new, first_para = _normalize(margin), _normalize(re.split(r"\n\s*\n", state.body.strip(), 1)[0])
+    if new in _normalize(state.body):
+        return True
+    like_body = difflib.SequenceMatcher(None, new, first_para).ratio()
+    return like_body >= 0.6 and like_body > difflib.SequenceMatcher(None, new, _normalize(state.margin)).ratio()
 
 
 def _is_first(conn, chunk_id) -> bool:
@@ -181,7 +192,7 @@ class ChunkRun:
             except ParseError as e:
                 msg = (f"Module classification for chunk {self.idx} was {e}; raw outputs are stored. "
                        "Re-run, or pass --module.")
-                print(msg)
+                eprint(msg)
                 log_error(self.llm.log_dir, msg)
                 return 1
         title = self.P[f"MODULE {letter}"].heading.split(" — ", 1)[1]
@@ -246,7 +257,7 @@ class ChunkRun:
             margin, body = split_file(raw, self.first)
         except FileFormatError as e:
             raise FileFormatError(str(e).replace("the chunk file", self.path.name)) from None
-        if self.first and margin != state.margin and _normalize(margin) in _normalize(state.body):
+        if self.first and margin != state.margin and _looks_like_body(margin, state):
             raise FileFormatError(
                 f"ERROR: the first paragraph of {self.path.name} is narration from the body; the margin "
                 "paragraph seems to be deleted. Restore it (the hook replaces it later).")
@@ -327,12 +338,16 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
             edited = c.sync_file() == "edit"
         except FileFormatError as e:
             if not redraft:
-                print(f"{e} Fix it, or delete the file to restore the stored text (--redraft also works).")
+                eprint(f"{e} Fix it, or delete the file to restore the stored text (--redraft also works).")
                 return 1
-            # Keep the operator's text in history (not ok, so it never enters the narration fold).
-            db.add_pass(c.conn, c.novel_id, c.chunk["id"], "operator_edit", None, "",
-                        c.path.read_text(encoding="utf-8"), verdict="PARSE_FAILED",
-                        note="malformed file replaced by --redraft")
+            # Keep the operator's text in history (not ok, so it never enters the narration fold), once.
+            raw = c.path.read_text(encoding="utf-8")
+            last = c.conn.execute(
+                "SELECT output_text FROM passes WHERE chunk_id = ? AND kind = 'operator_edit'"
+                " AND verdict = 'PARSE_FAILED' ORDER BY id DESC LIMIT 1", (c.chunk["id"],)).fetchone()
+            if not last or last["output_text"] != raw:
+                db.add_pass(c.conn, c.novel_id, c.chunk["id"], "operator_edit", None, "", raw,
+                            verdict="PARSE_FAILED", note="malformed file replaced by --redraft")
             print(f"Note: {c.path.name} can't be read ({e}); it is stored in history and --redraft replaces it.")
     if accept_tracker and (status_at_start != "tracker_pending" or edited):
         print(f"Note: --accept-tracker ignored; your edit to {c.path.name} will be re-checked and a new "
@@ -364,7 +379,7 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
         d = c.draft(module, note="--redraft requested" if started else None)
     except ParseError as e:
         msg = f"Chunk {c.idx} draft output was {e}; raw outputs are stored. Re-run to try again."
-        print(msg)
+        eprint(msg)
         log_error(c.llm.log_dir, msg)
         return 1
 

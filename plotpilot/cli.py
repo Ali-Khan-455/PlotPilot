@@ -10,10 +10,14 @@ from pathlib import Path
 import anthropic
 
 from plotpilot import config, db
-from plotpilot.ingest import estimate_tokens, parse_novel, plan_chunks
+from plotpilot.ingest import Parsed, estimate_tokens, parse_novel, plan_chunks
 from plotpilot.llm import LLM, LLMError, log_error
 from plotpilot.pipeline import run_novel
 from plotpilot.prompts import load_prompts
+
+
+NO_HEADINGS = ("No chapter headings found (expected 'Chapter N', 'Chapter IV', 'Chapter One', "
+               "'Prologue', 'Epilogue' on their own line after a blank line).")
 
 
 def fail(msg: str) -> int:
@@ -63,6 +67,8 @@ def main(argv=None, client=None) -> int:
         return fail(f"Cannot read '{path}': not valid UTF-8 ({e.reason} at byte {e.start}).")
 
     parsed = parse_novel(text)
+    if not parsed.chapters and not Path(config.DB_PATH).exists():  # nothing stored yet: don't create the DB
+        return fail(NO_HEADINGS)
     try:
         conn = db.connect(config.DB_PATH)
     except sqlite3.Error as e:
@@ -73,8 +79,7 @@ def main(argv=None, client=None) -> int:
             return fail(f"'{slug}' is already planned from {existing[1]} with different content. "
                         "History is append-only; rename the file to plan it as a new novel.")
         if not existing and not parsed.chapters:
-            return fail("No chapter headings found (expected 'Chapter N', 'Chapter IV', 'Chapter One', "
-                        "'Prologue', 'Epilogue' on their own line after a blank line).")
+            return fail(NO_HEADINGS)
         novel_id = existing[0] if existing else db.save_plan(
             conn, slug, path.stem, str(path.resolve()), sha, plan_chunks(parsed.chapters))
         rows = db.load_chunks(conn, novel_id)
@@ -90,6 +95,8 @@ def main(argv=None, client=None) -> int:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+    except sqlite3.OperationalError as e:  # e.g. a read-only database or directory
+        return fail(f"Cannot write the database {config.DB_PATH}: {e}.")
     finally:
         conn.close()
 
@@ -100,13 +107,16 @@ def _print_manifest(path, parsed, rows, stored):
     print(f"Novel: {path.stem} — {chapters} chapters, {total:,} words, "
           f"{len(rows)} chunk{'' if len(rows) == 1 else 's'}")
     fresh = (len(parsed.chapters), sum(c.words for c in parsed.chapters))
-    if fresh != (chapters, total):
+    changed = fresh != (chapters, total)
+    if changed:
         print(f"Note: the parser now reads this file as {fresh[0]} chapters, {fresh[1]:,} words; "
-              "the stored plan is used.")
+              "the stored plan is used (its parse warnings are not shown).")
     print(f"{'#':>3}  {'Chapters':<20}{'Words':>8}")
     for idx, label, words in rows:
         print(f"{idx:>3}  {label:<20}{words:>8,}")
 
+    if changed:
+        parsed = Parsed([])  # warnings from a parse that doesn't match the stored plan would mislead
     if parsed.front_words:
         print(f"WARNING: dropped {parsed.front_words:,} words of front matter "
               "(before the first chapter / table of contents / Gutenberg header).")

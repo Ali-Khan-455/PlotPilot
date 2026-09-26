@@ -53,8 +53,8 @@ CHAPTER_RE = re.compile(
 SMALL_PRINT_RE = re.compile(r"^\*END\*THE SMALL PRINT", re.I)
 SIDE_RE = re.compile(r"^[ \t]*(?P<kw>prologue|epilogue)(?:[ \t]*[:.,\-–—][^\n]{0,80})?[ \t]*$", re.I)
 GUT_START_RE = re.compile(r"^\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG", re.I)
-GUT_END_RE = re.compile(r"^(?:\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG|[ \t]*END OF (?:THE )?PROJECT GUTENBERG)",
-                        re.I)
+GUT_END_RE = re.compile(r"^\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG", re.I)
+GUT_END_LINE_RE = re.compile(r"^[ \t]*END OF (?:THE )?PROJECT GUTENBERG", re.I)  # ends the text only after the last heading
 ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 
 
@@ -146,7 +146,10 @@ def parse_novel(text: str) -> Parsed:
         first_head = next((i for i, ln in enumerate(lines)
                            if (i == 0 or not lines[i - 1].strip()) and is_heading_line(ln)), len(lines))
         start = next((i + 1 for i, ln in enumerate(lines[:first_head]) if SMALL_PRINT_RE.match(ln)), 0)
-    end = next((i for i in range(start, len(lines)) if GUT_END_RE.match(lines[i])), len(lines))
+    last_head = max((i for i in range(start, len(lines))
+                     if (i == start or not lines[i - 1].strip()) and is_heading_line(lines[i])), default=-1)
+    end = next((i for i in range(start, len(lines))
+                if GUT_END_RE.match(lines[i]) or (i > last_head and GUT_END_LINE_RE.match(lines[i]))), len(lines))
     trailing_words = count_words("\n".join(lines[end:]))
 
     heads = [
@@ -203,6 +206,25 @@ class Chunk:
     words: int
 
 
+def _book_number(ch: Chapter) -> str:
+    """The book's own name for a chapter: its number, or Prologue/Epilogue (else its position)."""
+    n = heading_number(ch.heading)
+    if n is not None:
+        return str(n)
+    side = SIDE_RE.match(ch.heading)
+    return side["kw"].title() if side else str(ch.idx)
+
+
+def _label(first: Chapter, last: Chapter) -> str:
+    """'Ch 1–5', 'Ch 7', 'Prologue–Ch 4', 'Ch 5–Epilogue', using the book's own numbering."""
+    a, b = _book_number(first), _book_number(last)
+    if first is last or a == b:
+        return f"Ch {a}" if a.isdigit() else a
+    if a.isdigit() and b.isdigit():
+        return f"Ch {a}–{b}"
+    return "–".join(f"Ch {x}" if x.isdigit() else x for x in (a, b))
+
+
 def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
     chunks: list[Chunk] = []
     group: list[Chapter] = []
@@ -213,7 +235,7 @@ def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
     def flush():
         if group:
             a, b = group[0].idx, group[-1].idx
-            add(f"Ch {a}" if a == b else f"Ch {a}–{b}", a, b,
+            add(_label(group[0], group[-1]), a, b,
                 "\n\n".join(f"{c.heading}\n\n{c.body}" for c in group),
                 sum(c.words for c in group))
             group.clear()
@@ -232,7 +254,7 @@ def plan_chunks(chapters: list[Chapter]) -> list[Chunk]:
                 text = "\n\n* * *\n\n".join(piece)
                 if k == 1:
                     text = f"{ch.heading}\n\n{text}"
-                label = f"Ch {ch.idx}" if len(pieces) == 1 else f"Ch {ch.idx} (part {k}/{len(pieces)})"
+                label = _label(ch, ch) if len(pieces) == 1 else f"{_label(ch, ch)} (part {k}/{len(pieces)})"
                 add(label, ch.idx, ch.idx, text, sum(map(count_words, piece)))
             continue
         if len(group) == config.MAX_CHAPTERS or sum(c.words for c in group) + ch.words > config.MAX_WORDS:

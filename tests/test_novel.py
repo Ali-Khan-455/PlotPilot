@@ -117,7 +117,7 @@ def test_invalid_pending_json_refused(cwd, capsys):
     [p] = pending(cwd)
     p.write_text("{broken")
     code, _ = run("--accept-tracker")
-    assert code == 1 and status(1) == "tracker_pending" and "invalid" in capsys.readouterr().out
+    assert code == 1 and status(1) == "tracker_pending" and "invalid" in capsys.readouterr().err
 
 
 def test_missing_pending_file_rewritten_at_gate(cwd):
@@ -132,7 +132,7 @@ def test_tracker_malformed_twice(cwd, capsys):
     from tests.fakes import AUTO_AUDIT, AUTO_PASS
     code, _ = run("--module", "A", replies=[draft1(), AUTO_AUDIT, AUTO_PASS, BODY1, "junk", "junk"])
     assert code == 1 and status(1) == "normalized"
-    assert "tracker output was malformed twice" in capsys.readouterr().out
+    assert "tracker output was malformed twice" in capsys.readouterr().err
     # no bypass (a): --accept-tracker on normalized is ignored; P10/P11 rerun; gate; no merge
     code, _ = run("--accept-tracker", replies=[delta()])
     assert code == 0 and status(1) == "tracker_pending" and q("SELECT id FROM tracker_versions") == []
@@ -382,7 +382,7 @@ def test_scenes_malformed_twice(cwd, capsys):
     from tests.fakes import AUTO_AUDIT, AUTO_PASS
     code, _ = run("--module", "A", replies=[draft1(), AUTO_AUDIT, AUTO_PASS, BODY1, delta(), "junk", "junk"])
     assert code == 1 and status(1) == "normalized"
-    assert "scenes output was malformed twice" in capsys.readouterr().out
+    assert "scenes output was malformed twice" in capsys.readouterr().err
 
 
 def test_accept_with_pending_file_missing(cwd, capsys):
@@ -390,7 +390,7 @@ def test_accept_with_pending_file_missing(cwd, capsys):
     [p] = pending(cwd)
     p.unlink()
     code, _ = run("--accept-tracker")
-    assert code == 1 and status(1) == "tracker_pending" and "not found" in capsys.readouterr().out
+    assert code == 1 and status(1) == "tracker_pending" and "not found" in capsys.readouterr().err
     assert q("SELECT id FROM tracker_versions") == []
 
 
