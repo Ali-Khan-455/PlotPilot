@@ -204,7 +204,7 @@ def test_file_without_blank_line_is_an_error(cwd, capsys):
     run("--module", "A", replies=[draft(), AUDIT_CLEAN, FAIL])
     chunk_path(cwd).write_text("one paragraph only, no margin separation, edited\n")
     code, _ = run()
-    assert code == 1 and "keep the margin as its own first paragraph" in capsys.readouterr().out
+    assert code == 1 and "start with the margin as its own paragraph" in capsys.readouterr().out
 
 
 def test_legacy_single_space_file_is_stale(cwd, capsys):
@@ -297,3 +297,115 @@ def test_operator_edit_is_not_retextured(cwd):
     assert code == 0 and status() == "tracker_pending"
     assert [c["model"] for c in client.calls] == [config.QC_MODEL] * 4  # P7 + P9 + P10 + P11, no P8
     assert "OPERATOR FIX." in chunk_path(cwd).read_text()
+
+
+# --- deferred minors (Phase 3) --------------------------------------------------
+
+def draft_paras(margin=MARGIN):
+    return draft(margin) + "\n\nA second paragraph follows here."
+
+
+def test_deleted_margin_paragraph_is_refused(cwd, capsys):
+    run("--module", "A", replies=[draft_paras(), AUDIT_CLEAN, PASS, BODY + "\n\nA second paragraph follows here."])
+    before = rows()
+    chunk_path(cwd).write_text(BODY + "\n\nA second paragraph, edited.\n")
+    capsys.readouterr()
+    code, client = run()
+    assert code == 1 and client.calls == [] and rows() == before
+    assert "margin paragraph seems to be deleted" in capsys.readouterr().out
+
+
+def test_blank_line_with_spaces_splits_margin(cwd):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
+    chunk_path(cwd).write_text(f"{MARGIN}\n   \n{BODY} Edited.\n")
+    code, _ = run(auto_qc=True)
+    assert code == 0 and chunk_path(cwd).read_text() == f"{MARGIN}\n\n{BODY} Edited.\n"
+    edits = [r for r in rows() if r[0] == "operator_edit"]
+    assert len(edits) == 1
+
+
+def test_crash_during_edit_rewrite_records_one_edit(cwd, monkeypatch):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
+    chunk_path(cwd).write_text(f"I am  a farmer's son.\n\n{BODY} Edited.\n")  # non-canonical margin
+    import plotpilot.pipeline as pipeline
+    real = pipeline.ChunkRun.write
+    monkeypatch.setattr(pipeline.ChunkRun, "write", lambda self: (_ for _ in ()).throw(RuntimeError("crash")))
+    with pytest.raises(RuntimeError):
+        run(auto_qc=True)
+    monkeypatch.setattr(pipeline.ChunkRun, "write", real)
+    code, _ = run(auto_qc=True)
+    assert code == 0 and kinds().count("operator_edit") == 1
+    assert chunk_path(cwd).read_text().startswith("I am a farmer's son.\n\n")
+
+
+def test_tts_warnings_are_shown_again_at_the_gate(cwd, capsys):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY + " I saw 3 guards."])
+    capsys.readouterr()
+    code, client = run()
+    assert code == 0 and client.calls == [] and "WARNING: TTS hazard" in capsys.readouterr().out
+
+
+def test_repair_margin_after_qc_uses_current_first_sentence(cwd):
+    new_first = "Nobody expected a single thing from me."
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY.replace(TARGET, new_first)])
+    code, client = run("--repair-margin", replies=["<<<MARGIN_START>>>\nI farm.\n<<<MARGIN_END>>>"])
+    assert code == 0 and f'"{new_first}"' in user_msg(client, 0)
+
+
+def test_override_log_is_one_line_and_survives_getuser(cwd, monkeypatch):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, FAIL])
+    monkeypatch.setattr(getpass, "getuser", lambda: (_ for _ in ()).throw(OSError("no user")))
+    code, _ = run("--accept-factcheck=first line\nsecond line", replies=[BODY])
+    assert code == 0
+    log = (cwd / "logs" / "factcheck-overrides.log").read_text().splitlines()
+    assert len(log) == 1 and "first line second line" in log[0] and "| unknown |" in log[0]
+
+
+def test_override_log_written_before_db_row(cwd, monkeypatch):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, FAIL])
+    import plotpilot.db as db
+    real = db.add_pass
+
+    def crash(*a, **k):
+        if a[3] == "factcheck_override":
+            raise RuntimeError("crash")
+        return real(*a, **k)
+    monkeypatch.setattr(db, "add_pass", crash)
+    with pytest.raises(RuntimeError):
+        run("--accept-factcheck=paraphrase")
+    assert "paraphrase" in (cwd / "logs" / "factcheck-overrides.log").read_text()
+    assert status() == "factcheck_failed"
+
+
+def test_redraft_recovers_from_a_malformed_file(cwd, capsys):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
+    chunk_path(cwd).write_text(f"{MARGIN} {BODY} but edited without a blank line.\n")
+    capsys.readouterr()
+    code, _ = run()
+    assert code == 1 and "delete the file to restore the stored text" in capsys.readouterr().out
+    code, _ = run("--redraft", replies=[draft("Second margin.")], auto_qc=True)
+    assert code == 0 and chunk_path(cwd).read_text().startswith("Second margin.\n\n")
+
+
+def test_edit_at_drafted_stays_drafted(cwd):
+    run("--module", "A", replies=[draft(), "garbage", "garbage"])
+    assert status() == "drafted"
+    chunk_path(cwd).write_text(f"{MARGIN}\n\n{BODY} Edited.\n")
+    code, _ = run(replies=["garbage", "garbage"])
+    assert code == 1 and status() == "drafted" and kinds().count("operator_edit") == 1
+
+
+def test_accept_factcheck_after_edit_is_checked_first(cwd, capsys):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, FAIL])
+    chunk_path(cwd).write_text(f"{MARGIN}\n\n{BODY} Fixed.\n")
+    capsys.readouterr()
+    code, _ = run("--accept-factcheck=because", auto_qc=True)
+    assert code == 0 and "your edit to chunk-01.txt will be fact-checked first" in capsys.readouterr().out
+    assert "factcheck_override" not in kinds()
+
+
+@pytest.mark.parametrize("p8", [connection_error(), ("half a rewrite", "max_tokens")])
+def test_failed_texture_continues_to_tts(cwd, capsys, p8):
+    code, _ = run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, p8, BODY])
+    assert code == 0 and status() == "tracker_pending"
+    assert "texture repair failed" in capsys.readouterr().out

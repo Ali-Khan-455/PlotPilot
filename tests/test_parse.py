@@ -364,3 +364,31 @@ def test_check_margin_quoted_opening():
 def test_check_margin_more_than_two_sentences():
     assert check_margin("I am a boy. I live here. I farm.") == "more than two sentences"
     assert check_margin("I am a boy. I live here.") is None
+
+
+# --- deferred minors (Phase 3) --------------------------------------------------
+
+W50 = " ".join(["word"] * 50)
+
+
+@pytest.mark.parametrize("bad", [
+    "Sure! Here is the normalized narration:\n" + W50,
+    "Normalized narration:\n" + W50,
+    W50 + "\n\nI hope this helps!",
+    W50 + "\n\nEnd of normalized narration.",
+    W50 + "\n\nNote: I kept the phonetic hint for Kael unchanged as instructed.",
+    W50 + "\n\n(Note: numbers were converted to words throughout the whole narration above.)",
+])
+def test_rewrite_rejects_more_wrappers(bad):
+    with pytest.raises(ParseError):
+        check_rewrite(bad, W50)
+
+
+def test_rewrite_accepts_dash_cliffhanger():
+    check_rewrite(W50 + "\n\nThen the door opened—", W50)
+
+
+def test_factcheck_step_headers_are_not_flags():
+    text = ("**Step 2: PRESENT / MISSING check**\n- The guard reveals the map: MISSING\n"
+            "## Step 3 — INVENTED lines\n- \"I flew.\" INVENTED\nFinal verdict: FAIL")
+    assert parse_factcheck(text).flags == ["- The guard reveals the map: MISSING", '- "I flew." INVENTED']

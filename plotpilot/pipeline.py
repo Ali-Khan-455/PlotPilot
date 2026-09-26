@@ -2,6 +2,7 @@
 state and file sync that QC (qc.py) builds on, and the chunk loop (run_novel)."""
 
 import json
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -9,8 +10,8 @@ import anthropic
 
 from plotpilot import config, db, tracker
 from plotpilot.llm import LLMError, log_error
-from plotpilot.parse import (ParseError, check_margin, parse_continuation, parse_draft, parse_module,
-                             parse_repair)
+from plotpilot.parse import (ParseError, _normalize, check_margin, first_sentence, parse_continuation,
+                             parse_draft, parse_module, parse_repair)
 from plotpilot.prompts import fill
 
 REPAIR_TARGET = ("[paste the target sentence — the one immediately following the margin, "
@@ -50,9 +51,10 @@ def split_file(text: str, has_margin: bool = True):
         if not text.strip():
             raise FileFormatError("ERROR: the chunk file is empty.")
         return None, text.strip()
-    parts = text.strip().split("\n\n", 1)
+    parts = re.split(r"\n[ \t]*\n", text.strip(), maxsplit=1)
     if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
-        raise FileFormatError("ERROR: keep the margin as its own first paragraph (blank line after it).")
+        raise FileFormatError("ERROR: the chunk file must start with the margin as its own paragraph, then a blank "
+                              "line (older files kept them on one line: add a blank line after the margin).")
     return " ".join(parts[0].split()), parts[1].strip()
 
 
@@ -242,13 +244,18 @@ class ChunkRun:
                   "whitespace counts as an edit).")
             return "stale"
         try:
-            split_file(raw, self.first)
+            margin, body = split_file(raw, self.first)
         except FileFormatError as e:
             raise FileFormatError(str(e).replace("the chunk file", self.path.name)) from None
+        if self.first and margin != state.margin and _normalize(margin) in _normalize(state.body):
+            raise FileFormatError(
+                f"ERROR: the first paragraph of {self.path.name} is narration from the body; the margin "
+                "paragraph seems to be deleted. Restore it (the hook replaces it later).")
         new_status = "drafted" if self.status == "drafted" else "audited"
+        # Canonical form first, so a crash before the insert leaves a file that is recorded once on rerun.
+        self.path.write_text(render(margin, body), encoding="utf-8")
         db.add_pass(self.conn, self.novel_id, self.chunk["id"], "operator_edit", None, "", raw,
                     new_status=new_status)
-        self.write()  # canonical form, so an unchanged file never re-triggers
         print(f"Recorded your edit to {self.path.name}; it will be fact-checked.")
         return "edit"
 
@@ -316,8 +323,10 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
         try:
             edited = c.sync_file() == "edit"
         except FileFormatError as e:
-            print(e)
-            return 1
+            if not redraft:
+                print(f"{e} Fix it, or delete the file to restore the stored text (--redraft also works).")
+                return 1
+            print(f"Note: {c.path.name} can't be read ({e}); --redraft replaces it.")
     if accept_tracker and (status_at_start != "tracker_pending" or edited):
         print(f"Note: --accept-tracker ignored; your edit to {c.path.name} will be re-checked and a new "
               "tracker delta produced first." if edited else
@@ -333,7 +342,8 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
         if module:
             print(f"Note: --module is ignored; chunk {c.idx} is already drafted (use --redraft to redo it).")
         state = narration_state(c.conn, c.chunk["id"])
-        c.repair(state.margin, state.target, FORCED)
+        # QC may have rewritten the draft's target; the margin must lead into the current first sentence.
+        c.repair(state.margin, first_sentence(state.body), FORCED)
         c.write()
         return qc.run(c, accept=accept, edited=edited, accept_tracker=accept_tracker)
 

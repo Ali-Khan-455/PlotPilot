@@ -37,9 +37,27 @@ def _latest_after_draft(c, kind):
     return db.latest_pass(c.conn, c.chunk["id"], kind, after_id=draft["id"])
 
 
+def _sync_logs(c):
+    """Rewrite the audit and fact-check logs from the DB, so a crash after an insert can't leave them stale."""
+    paths = {}
+    for kind, name in (("audit", "audit"), ("factcheck", "factcheck")):
+        row = _latest_after_draft(c, kind)
+        if row:
+            paths[name] = _write_log(c, name, row["output_text"])
+    return paths
+
+
+def _print_tts(text):
+    hazards = tts_hazards(text)
+    for line, kind, excerpt in hazards[:MAX_TTS_WARNINGS]:
+        print(f"WARNING: TTS hazard line {line} ({kind}): …{excerpt}…")
+    if len(hazards) > MAX_TTS_WARNINGS:
+        print(f"… and {len(hazards) - MAX_TTS_WARNINGS} more")
+
+
 def _print_gate(c):
     fc = parse_factcheck(_latest_after_draft(c, "factcheck")["output_text"])
-    log_path = Path(config.LOG_DIR) / c.slug / f"chunk-{c.chunk['idx']:02d}-factcheck.md"
+    log_path = _sync_logs(c)["factcheck"]
     file_text = c.path.read_text(encoding="utf-8") if c.path.exists() else ""
     print(f"FACT-CHECK FAIL for chunk {c.chunk['idx']} (full output: {log_path})")
     for flag in fc.flags:
@@ -57,13 +75,20 @@ def _print_gate(c):
     return fc.flags
 
 
+def _user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # no user name in some containers
+        return "unknown"
+
+
 def _override(c, reason):
     fc = parse_factcheck(_latest_after_draft(c, "factcheck")["output_text"])
     flags = " || ".join(fc.flags) if fc.flags else "(no flags parsed)"
     Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
     with open(Path(config.LOG_DIR) / "factcheck-overrides.log", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now(timezone.utc).isoformat()} | {c.slug} | chunk {c.idx} | "
-                f"{getpass.getuser()} | {reason} | {flags}\n")
+                f"{_user()} | {' '.join(reason.split())} | {' '.join(flags.split())}\n")
     db.add_pass(c.conn, c.novel_id, c.chunk["id"], "factcheck_override", None, "", flags, note=reason,
                 new_status="checked")
     print(f"Fact-check FAIL accepted by operator: {reason}")
@@ -230,14 +255,11 @@ def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
             except ParseError as e:
                 return _malformed(c, "TTS normalization", e)
             c.write()
-            hazards = tts_hazards(new)
-            for line, kind, excerpt in hazards[:MAX_TTS_WARNINGS]:
-                print(f"WARNING: TTS hazard line {line} ({kind}): …{excerpt}…")
-            if len(hazards) > MAX_TTS_WARNINGS:
-                print(f"… and {len(hazards) - MAX_TTS_WARNINGS} more")
+            _print_tts(new)
 
         elif status == "normalized":
             c.write()
+            _sync_logs(c)
             print(READ_ALOUD)
             print(f"Chunk {c.idx} QC complete → {c.path}.")
             changed = _latest_body_change(c)
@@ -266,6 +288,7 @@ def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
 
         elif status == "tracker_pending":
             if not accept_tracker:
+                _print_tts(body)  # shown again on every rerun at the gate
                 _tracker_gate(c)
                 return 0
             accept_tracker = False

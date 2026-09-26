@@ -132,11 +132,16 @@ AUDIT_END_RE = re.compile(r"(?i)^(?:tts|tone)\b")
 MD_HEADER_RE = re.compile(r"^\s*(?:#|\*\*|\d+[.)]\s*\*\*)")
 BULLET_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
 STEP_ECHO_RE = re.compile(r'(?i)state "PRESENT"|list any|list every|give a final')
+_WRAP_NOUN = r"(?:narration|text|version|rewrite|script|lines)"
 PREAMBLE_RE = re.compile(
-    r"(?i)^here(?: is|'s) (?:the|your) [^\n]*(?:narration|text|version|rewrite|script)[^\n]*:$")
+    r"(?i)^(?:(?:sure|okay|ok|certainly|of course|absolutely)\b[!.,]*\s*)?"
+    rf"(?:here(?: is|'s) (?:the|your) [^\n]*{_WRAP_NOUN}[^\n]*"
+    rf"|(?:the |your )?(?:normalized |rewritten |revised |updated |textured |final )?{_WRAP_NOUN}):$")
 SIGNOFF_RE = re.compile(
-    r"(?i)^\s*(?:hope this helps|let me know(?: if[^.!?]*)?|feel free[^.!?]*|happy to help|anything else)"
+    r"(?i)^\s*(?:i )?(?:hope this helps|let me know(?: if[^.!?]*)?|feel free[^.!?]*|happy to help|anything else"
+    rf"|end of (?:the )?(?:\w+ )?{_WRAP_NOUN})"
     r"[.!?]?\s*$")
+NOTE_RE = re.compile(r"(?i)^[(\[]?\s*[*_]*note\b")  # a trailing "Note: ..." paragraph, any length
 
 
 def _strip_md(line: str) -> str:
@@ -191,8 +196,10 @@ def parse_factcheck(text: str) -> Factcheck:
             verdicts.extend(found)
             continue
         if re.search(r"\b(MISSING|INVENTED)\b", c):
-            if re.match(r"(?i)^\s*step \d+", c) and STEP_ECHO_RE.search(c):
-                continue
+            if re.match(r"(?i)^\s*step \d+", c) and (
+                    STEP_ECHO_RE.search(c) or re.search(r"PRESENT\s*/\s*MISSING", c)
+                    or (MD_HEADER_RE.match(line) and not re.search(r'["“]', c))):
+                continue  # a step header or an echoed instruction, not a flagged line
             flags.append(line.strip())
     if not verdicts:
         raise ParseError("no PASS/FAIL verdict in the fact-check output")
@@ -216,8 +223,10 @@ def check_rewrite(new: str, old: str, min_ratio: float | None = None) -> str:
         raise ParseError("rewrite is wrapped in a code fence")
     paras = re.split(r"\n\s*\n", t)
     last = paras[-1].strip()
+    if len(paras) > 1 and NOTE_RE.match(last) and _normalize(last) not in _normalize(old):
+        raise ParseError(f"rewrite ends with a note: {last[:60]!r}")
     if len(paras) > 1 and len(last.split()) < 8 and _normalize(last) not in _normalize(old):
-        ends_ok = last.endswith((".", "!", "?", '"', "”", "’", "'"))
+        ends_ok = last.endswith((".", "!", "?", '"', "”", "’", "'", "—", "–"))
         quoted = any(q in last for q in '"“”')
         if not ends_ok or (not quoted and SIGNOFF_RE.match(last)):
             raise ParseError(f"rewrite ends with a sign-off: {last!r}")
