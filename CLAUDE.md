@@ -2,8 +2,9 @@
 
 PlotPilot converts a full novel (`.txt`) into a TTS-ready, first-person-MC YouTube narration script, plus a parallel scene-metadata file for later image sync. Local Python CLI. Solo recap-channel creators are the users.
 
-- **Source of truth for pipeline logic and every LLM prompt:** `prompts/v4-spec.md` (imported below). Code loads prompt text from that file. Never paraphrase or inline prompt text in code.
+- **Source of truth for pipeline logic and every LLM prompt:** each system owns its own prompt spec under `prompts/`. PlotPilot → `prompts/v4-spec.md` (imported below), Image-Sync → `prompts/image-sync-v3.md`. Code loads prompt text from its system's spec. Never paraphrase or inline prompt text in code.
 - **Architecture, decisions, and phase scope:** `docs/architecture-audit.md`. Read it before planning any phase.
+- **Image-Sync** (`imagesync/`, `imagesync.py`): turns PlotPilot's finished output into image prompts. Plan and phases: `docs/image-sync-plan.md`; rulings: `docs/image-sync-audit.md`. It reads `plotpilot.db` read-only and keeps its own `imagesync.db`.
 
 ## Stack
 
@@ -53,7 +54,7 @@ MVP: the whole novel is one Part. The hook runs once, at the very end.
 
 ## Non-negotiable rules for code changes
 
-- Do not change the pipeline order, the gates, or the prompt text without the user's explicit approval. Spec edits go in `prompts/v4-spec.md` only.
+- Do not change the pipeline order, the gates, or the prompt text without the user's explicit approval. Spec edits go in that system's spec file only.
 - Keep every draft and every pass output (fair-use record). Never overwrite history in SQLite. Append.
 - Narration files contain only narration: no delimiters, no scene markers, no headers.
 - Log token usage for every LLM call to `logs/usage.csv`.

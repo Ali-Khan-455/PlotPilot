@@ -1,4 +1,6 @@
-# Image-Sync Engine — plan (for review, nothing built yet)
+# Image-Sync Engine — plan
+
+**Status:** IS-1 (foundation) built; see `docs/image-sync-audit.md`. IS-2 is blocked on C4.
 
 ## Context
 

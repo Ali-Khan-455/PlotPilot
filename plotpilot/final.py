@@ -3,6 +3,7 @@ the splice check (D20), the assembled script, and the scene metadata file (R5)."
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
@@ -24,14 +25,70 @@ def _fail(c, msg) -> int:
     return 1
 
 
-def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model, out_dir) -> int:
+class NotReady(Exception):
+    """The hook, or its Prompt 9 pass, is not stored yet."""
+
+
+@dataclass(frozen=True)
+class Inputs:
+    rows: list
+    states: list
+    bodies: list
+    target: str
+
+
+@dataclass(frozen=True)
+class Outputs:
+    hook: str
+    bodies: list
+    scenes_per_chunk: list      # per chunk: [(first_sentence, description)]
+    script: str
+    lines: list                 # the metadata lines, novel-wide
+    warnings: list
+    chunk_lines: list           # `lines` split by each chunk's scene count
+
+
+def derive_inputs(conn, novel_id) -> Inputs:
+    """What the final stage needs before any hook exists: the chunk bodies and the D20 target."""
     rows = db.chunks(conn, novel_id)
+    states = [narration_state(conn, r["id"]) for r in rows]
+    target = json.loads(db.latest_tracker(conn, novel_id))["chunk1"]["target"]
+    return Inputs(rows, states, [s.body for s in states], target)
+
+
+def derive_outputs(conn, novel_id, inputs: Inputs | None = None) -> Outputs:
+    """The final script and scene metadata exactly as run_final builds them, read-only from stored passes.
+    Shared with Image-Sync. Note: this does NOT run the D20 splice check; callers run it separately."""
+    inp = inputs or derive_inputs(conn, novel_id)
+    cid = inp.rows[0]["id"]
+    hook_pass = db.latest_pass(conn, cid, "hook")
+    if not hook_pass:
+        raise NotReady("no hook pass is stored")
+    hook = parse_hook(hook_pass["output_text"], inp.target)
+    tts_pass = db.latest_pass(conn, cid, "hook_tts", after_id=hook_pass["id"])
+    if not tts_pass:
+        raise NotReady("the hook has no TTS (Prompt 9) pass")
+    hook = check_hook_tts(tts_pass["output_text"], hook, inp.target)
+    script = assemble.join(hook, inp.bodies)
+    scenes = []
+    for r in inp.rows:
+        sc = tracker.validate_scenes(tracker.extract_json(db.latest_pass(conn, r["id"], "scenes")["output_text"]))
+        scenes.append([(s["first_sentence"], s["description"]) for s in sc["scenes"]])
+    # scene_lines runs once, novel-wide (per chunk it would restart at [00:00]); then split per chunk.
+    lines, warnings = assemble.scene_lines(script, assemble.chunk_starts(hook, inp.bodies), scenes)
+    chunk_lines, pos = [], 0
+    for sc in scenes:
+        chunk_lines.append(lines[pos:pos + len(sc)])
+        pos += len(sc)
+    return Outputs(hook, inp.bodies, scenes, script, lines, warnings, chunk_lines)
+
+
+def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model, out_dir) -> int:
+    inp = derive_inputs(conn, novel_id)
+    rows, states, bodies, target = inp.rows, inp.states, inp.bodies, inp.target
     c = ChunkRun(conn, llm, prompts, novel_id, slug, title, rows[0],
                  gen_model=gen_model, qc_model=qc_model, out_dir=out_dir)
     cid = rows[0]["id"]
-    states = [narration_state(conn, r["id"]) for r in rows]
-    bodies = [s.body for s in states]
-    target = json.loads(db.latest_tracker(conn, novel_id))["chunk1"]["target"]
 
     # D20 precondition, before the one-time Prompt 5 call.
     try:
@@ -79,10 +136,8 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
                       max_tokens=config.QC_MAX_TOKENS)
         except ParseError as e:
             return _fail(c, f"Hook TTS normalization output was {e}; raw outputs are stored. Re-run to try again.")
-        tts_pass = db.latest_pass(conn, cid, "hook_tts", after_id=hook_pass["id"])
-    hook = check_hook_tts(tts_pass["output_text"], hook, target)
-
-    script = assemble.join(hook, bodies)
+    out = derive_outputs(conn, novel_id, inp)
+    hook, script = out.hook, out.script
     try:
         assemble.splice_check(script, target)  # D20
     except assemble.SpliceError as e:
@@ -94,11 +149,7 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
               "is rebuilt from the database on every run; edits to it are not kept.")
     script_path.write_text(script, encoding="utf-8")
 
-    scenes = []
-    for r in rows:
-        sc = tracker.validate_scenes(tracker.extract_json(db.latest_pass(conn, r["id"], "scenes")["output_text"]))
-        scenes.append([(s["first_sentence"], s["description"]) for s in sc["scenes"]])
-    lines, warnings = assemble.scene_lines(script, assemble.chunk_starts(hook, bodies), scenes)
+    lines, warnings = out.lines, out.warnings
     for w in warnings:
         print(f"WARNING: {w}")  # printed only: the file is rebuilt every run (R22)
     meta_path = Path(config.METADATA_DIR) / f"{slug}.txt"

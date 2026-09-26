@@ -2,67 +2,10 @@
 import json
 import sqlite3
 
-import pytest
-
 import plotpilot.config as config
-from plotpilot.cli import main
 from tests.fakes import FakeClient
-
-WORDS = " ".join(["word"] * 100)
-MARGIN = "I am a farmer's son in a poor village."
-TARGET = "Nobody expected much from me."
-BODY1 = f"{TARGET} Then the guard came. I ran for the hills."
-BODY2 = "I kept walking for days. The road was long. I reached the city at dusk."
-HOOK = "I got reborn as a farmer's son with zero talent."
-SCRIPT = f"{HOOK}\n\n{BODY1}\n\n{BODY2}\n"
-
-
-def hook_reply(text=HOOK):
-    return f"<<<HOOK_START>>>\n{text}\n<<<HOOK_END>>>\nhook length: 1 sentences"
-
-
-def draft1():
-    return (f"<<<MARGIN_START>>>\n{MARGIN}\n<<<MARGIN_END>>>\n"
-            f"<<<TARGET_SENTENCE_START>>>\n{TARGET}\n<<<TARGET_SENTENCE_END>>>\n"
-            f"margin is 1 sentence.\n\n{BODY1}")
-
-
-@pytest.fixture
-def cwd(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "book.txt").write_text("\n\n".join(f"Chapter {i}\n\n{WORDS}" for i in range(1, 7)) + "\n")
-    return tmp_path
-
-
-def run(*args, replies=(), **kw):
-    client = FakeClient(replies, auto_qc=True, **kw)
-    return main(["--novel", "book.txt", *args], client=client), client
-
-
-def q(sql, *a):
-    with sqlite3.connect(config.DB_PATH) as conn:
-        return conn.execute(sql, a).fetchall()
-
-
-def all_done(replies=(), **kw):
-    """Take both chunks to done; the last --accept-tracker run enters Phase 5 with `replies`."""
-    run("--module", "A", replies=[draft1()])
-    run("--accept-tracker", replies=["B"])
-    run("--module", "B", replies=[BODY2])
-    return run("--accept-tracker", replies=list(replies), **kw)
-
-
-def script(cwd):
-    return (cwd / "scripts" / "book" / "script.txt").read_text()
-
-
-def metadata(cwd):
-    return (cwd / "metadata" / "book.txt").read_text()
-
-
-def kinds(*ks):
-    marks = ",".join("?" * len(ks))
-    return q(f"SELECT kind, model, module, verdict FROM passes WHERE kind IN ({marks}) ORDER BY id", *ks)
+from tests.helpers import (BODY1, BODY2, HOOK, MARGIN, SCRIPT, TARGET, all_done, draft1, hook_reply, kinds,
+                           metadata, q, run, script)
 
 
 def test_happy_path(cwd, capsys):
@@ -252,3 +195,37 @@ def test_context_word_in_other_400_is_surfaced(cwd, capsys, monkeypatch):
     code, _ = all_done()
     out, errout = capsys.readouterr()
     assert code == 1 and "context window" not in out + errout and "context_management" in errout
+
+
+# --- IS-1: shared derivation for Image-Sync -------------------------------------------
+
+def _conn():
+    from plotpilot import db
+    return db.connect(config.DB_PATH)
+
+
+def test_derive_outputs_not_ready_before_hook(cwd):
+    from plotpilot.final import NotReady, derive_outputs
+    all_done(token_count=10**9)  # stops at D17, before any hook pass
+    import pytest
+    with pytest.raises(NotReady, match="hook"):
+        derive_outputs(_conn(), 1)
+
+
+def test_derive_outputs_not_ready_without_hook_tts(cwd):
+    from plotpilot.final import NotReady, derive_outputs
+    all_done([hook_reply(), "junk", "junk"])  # hook stored, Prompt 9 malformed twice
+    import pytest
+    with pytest.raises(NotReady, match="TTS"):
+        derive_outputs(_conn(), 1)
+
+
+def test_derive_outputs_matches_run_final_files(cwd):
+    from plotpilot.final import derive_outputs
+    all_done([hook_reply()])
+    out = derive_outputs(_conn(), 1)
+    assert out.script == script(cwd) and "".join(f"{line}\n" for line in out.lines) == metadata(cwd)
+    assert out.hook == HOOK and out.bodies == [BODY1, BODY2]
+    assert [len(c) for c in out.chunk_lines] == [len(s) for s in out.scenes_per_chunk] == [1, 1]
+    assert out.chunk_lines[0][0].startswith("[00:00]") and not out.chunk_lines[1][0].startswith("[00:00]")
+    assert sum(out.chunk_lines, []) == out.lines
