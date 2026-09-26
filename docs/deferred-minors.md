@@ -2,27 +2,6 @@
 
 Minor findings from each phase's final code review. They were deliberately left out of that phase's fix pass: none of them corrupts output or loses data. Fix them whenever it's convenient, write a failing test first, and delete the entry once it's fixed.
 
-## Open decisions (need the user)
-
-- **Digit / number-word headings have no prose guard** (Phase 1, `plotpilot/ingest.py` `CHAPTER_RE`). A wrapped prose line after a blank line, such as `Chapter one of my life was over.` or `Chapter 12 of the regulations forbade it.`, is taken as a chapter heading. The sequence warning catches it only when the number goes backwards or repeats. The options are a guard like the roman-numeral one (the number must end the line or be followed by punctuation), or leaving it as is. It is also listed in `docs/architecture-audit.md`, risk 1.
-
-## Phase 1 — Ingest + chunk plan
-
-- [ ] **Chapter numbers above 100 are misread** (`ingest.py`, the `CHAPTER_RE` number group allows at most two words). `Chapter One Hundred One` parses as 100. Only the sequence warning is affected.
-- [ ] **Words made only of roman-numeral letters are read as roman numerals** (`ingest.py`, `CHAPTER_RE`). `Chapter mix.` is a heading, numbered 1009. Words like `did` and `civil` behave the same way.
-- [ ] **A short real Prologue is folded as contents if a later heading also starts with "Prologue"** (`ingest.py`, `heading_key`). A 20-word `Prologue` is dropped when a later `Prologue: Part Two` exists.
-- [ ] **Gutenberg leftovers** (`ingest.py`, `parse_novel`).
-  - The `End of the Project Gutenberg EBook of X` line just before `*** END …` stays in the last chapter and reaches the LLM.
-  - Old-style `*END*THE SMALL PRINT!` headers aren't recognised by name. They are still dropped as front matter; only the warning's wording is affected.
-- [ ] **CLI error paths** (`cli.py`).
-  - `PermissionError` on the novel file, or a read-only working directory for `plotpilot.db`, ends in a traceback.
-  - The file is read twice (once for the sha, once for the text). A file that changes between the two reads could store a sha that doesn't match the parsed text.
-  - Error messages go to stdout, not stderr.
-- [ ] **The stored `source_path` is relative** (`cli.py`, `save_plan`). The "already planned from <path>" message is ambiguous from another directory. Use `path.resolve()`.
-- [ ] **The manifest prints "1 chunks"** (`cli.py`, `_print_manifest`).
-- [ ] **Header and rows can disagree on a rerun after a parser change** (`cli.py`). The header totals come from a fresh parse, but the rows come from the stored plan.
-- [ ] **Labels and warnings use sequential chapter indices, not the book's own numbering** (`ingest.py` / `cli.py`). This matters when there's a Prologue, or when the contents fold drops entries. Consider showing the heading text in warnings.
-
 ## Phase 2 — Chunk 1 draft
 
 - [ ] **A classification that stops at `max_tokens` is not retried** (`pipeline.py`, `_attempt`, `CLASSIFY_MAX_TOKENS=16`). A chatty reply exits 1 on the first try. Treat `max_tokens` on classify as a parse failure so retry-once applies.

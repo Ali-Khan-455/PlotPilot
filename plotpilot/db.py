@@ -59,6 +59,12 @@ def load_chunks(conn, novel_id):
     ).fetchall()
 
 
+def plan_totals(conn, novel_id):
+    """(chapters, words) of the stored plan."""
+    return tuple(conn.execute(
+        "SELECT MAX(chapter_end), SUM(word_count) FROM chunks WHERE novel_id = ?", (novel_id,)).fetchone())
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

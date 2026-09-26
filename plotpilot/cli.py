@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import re
+import sqlite3
+import sys
 from pathlib import Path
 
 import anthropic
@@ -15,7 +17,7 @@ from plotpilot.prompts import load_prompts
 
 
 def fail(msg: str) -> int:
-    print(msg)
+    print(msg, file=sys.stderr)
     return 1
 
 
@@ -50,27 +52,33 @@ def main(argv=None, client=None) -> int:
     slug = re.sub(r"[^a-z0-9]+", "-", path.stem.lower()).strip("-")
     if not slug:
         return fail(f"Cannot derive a name from '{path.name}'; rename it with letters or digits.")
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
     try:
-        text = path.read_text(encoding="utf-8-sig")  # text mode normalizes newlines
+        raw = path.read_bytes()  # read once: the sha and the parsed text come from the same bytes
+    except OSError as e:
+        return fail(f"Cannot read '{path}': {e.strerror or e}.")
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        text = raw.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as e:
         return fail(f"Cannot read '{path}': not valid UTF-8 ({e.reason} at byte {e.start}).")
 
     parsed = parse_novel(text)
-    if not parsed.chapters:
-        return fail("No chapter headings found (expected 'Chapter N', 'Chapter IV', 'Chapter One', "
-                    "'Prologue', 'Epilogue' on their own line after a blank line).")
-
-    conn = db.connect(config.DB_PATH)
+    try:
+        conn = db.connect(config.DB_PATH)
+    except sqlite3.Error as e:
+        return fail(f"Cannot open the database {config.DB_PATH}: {e}.")
     try:
         existing = db.find_novel(conn, slug)
         if existing and existing[2] != sha:
             return fail(f"'{slug}' is already planned from {existing[1]} with different content. "
                         "History is append-only; rename the file to plan it as a new novel.")
+        if not existing and not parsed.chapters:
+            return fail("No chapter headings found (expected 'Chapter N', 'Chapter IV', 'Chapter One', "
+                        "'Prologue', 'Epilogue' on their own line after a blank line).")
         novel_id = existing[0] if existing else db.save_plan(
-            conn, slug, path.stem, str(path), sha, plan_chunks(parsed.chapters))
+            conn, slug, path.stem, str(path.resolve()), sha, plan_chunks(parsed.chapters))
         rows = db.load_chunks(conn, novel_id)
-        _print_manifest(path, parsed, rows)
+        _print_manifest(path, parsed, rows, db.plan_totals(conn, novel_id))
         llm = LLM(client if client is not None else (lambda: make_client()), config.LOG_DIR)
         try:
             return run_novel(conn, llm, load_prompts(), novel_id, slug, path.stem, module=args.module,
@@ -80,16 +88,21 @@ def main(argv=None, client=None) -> int:
                               accept_tracker=args.accept_tracker)
         except (LLMError, anthropic.AnthropicError) as e:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}", file=sys.stderr)
             return 1
     finally:
         conn.close()
 
 
-def _print_manifest(path, parsed, rows):
-
-    total = sum(c.words for c in parsed.chapters)
-    print(f"Novel: {path.stem} — {len(parsed.chapters)} chapters, {total:,} words, {len(rows)} chunks")
+def _print_manifest(path, parsed, rows, stored):
+    """The header and rows come from the stored plan; warnings come from the fresh parse."""
+    chapters, total = stored
+    print(f"Novel: {path.stem} — {chapters} chapters, {total:,} words, "
+          f"{len(rows)} chunk{'' if len(rows) == 1 else 's'}")
+    fresh = (len(parsed.chapters), sum(c.words for c in parsed.chapters))
+    if fresh != (chapters, total):
+        print(f"Note: the parser now reads this file as {fresh[0]} chapters, {fresh[1]:,} words; "
+              "the stored plan is used.")
     print(f"{'#':>3}  {'Chapters':<20}{'Words':>8}")
     for idx, label, words in rows:
         print(f"{idx:>3}  {label:<20}{words:>8,}")
@@ -100,7 +113,8 @@ def _print_manifest(path, parsed, rows):
     if parsed.trailing_words:
         print(f"WARNING: dropped {parsed.trailing_words:,} words of trailing matter (Gutenberg licence).")
     if parsed.short_chapters:
-        print(f"WARNING: chapter(s) {', '.join(map(str, parsed.short_chapters))} have fewer than "
+        short = ", ".join(f"{c.idx} ('{c.heading}')" for c in parsed.chapters if c.idx in parsed.short_chapters)
+        print(f"WARNING: chapter(s) {short} have fewer than "
               f"{config.MIN_CHAPTER_WORDS} words; check they are real chapters.")
     for w in parsed.sequence_warnings:
         print(w)

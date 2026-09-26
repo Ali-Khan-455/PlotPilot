@@ -223,13 +223,13 @@ def test_api_error_is_logged(cwd, capsys):
     code, _ = run("--module", "A", replies=[connection_error()])
     assert code == 1 and status() == "planned"
     assert "Connection error" in (cwd / "logs" / "errors.log").read_text()
-    assert "ERROR" in capsys.readouterr().out
+    assert "ERROR" in capsys.readouterr().err
 
 
 def test_unknown_model_fails(cwd, capsys):
     client = FakeClient([], unknown_models={"claude-nope"})
     code = main(["--novel", "book.txt", "--module", "A", "--gen-model", "claude-nope"], client=client)
-    assert code == 1 and "Model ID 'claude-nope' not found" in capsys.readouterr().out
+    assert code == 1 and "Model ID 'claude-nope' not found" in capsys.readouterr().err
 
 
 def test_usage_row_per_call(cwd):
@@ -252,7 +252,7 @@ def test_missing_credentials_is_a_clean_error(cwd, capsys):
     client = FakeClient([])
     client.models.retrieve = lambda _id: (_ for _ in ()).throw(auth)
     code = main(["--novel", "book.txt", "--module", "A"], client=client)
-    assert code == 1 and "No Anthropic credentials found" in capsys.readouterr().out
+    assert code == 1 and "No Anthropic credentials found" in capsys.readouterr().err
     assert "credentials" in (cwd / "logs" / "errors.log").read_text()
 
 

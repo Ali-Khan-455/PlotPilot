@@ -26,7 +26,7 @@ def test_two_dashes_are_not_a_break():
 
 # --- parse_novel --------------------------------------------------------------
 
-from plotpilot.ingest import parse_novel, roman_to_int, words_to_int  # noqa: E402
+from plotpilot.ingest import heading_number, parse_novel, roman_to_int, words_to_int  # noqa: E402
 
 BODY = " ".join(["word"] * 60)  # comfortably above MIN_CHAPTER_WORDS
 
@@ -112,12 +112,11 @@ def test_contents_with_dot_leader_prologue():
 
 
 def test_sequence_warning_on_false_positive():
-    text = novel("Chapter 1", "Chapter 5 was the best year of his life", "Chapter 2")
+    text = novel("Chapter 1", "Chapter 5: A misplaced heading", "Chapter 2")
     p = parse_novel(text)
-    assert [c.heading for c in p.chapters] == [
-        "Chapter 1", "Chapter 5 was the best year of his life", "Chapter 2"]
+    assert [c.heading for c in p.chapters] == ["Chapter 1", "Chapter 5: A misplaced heading", "Chapter 2"]
     assert len(p.sequence_warnings) == 1
-    assert "'Chapter 2' after 'Chapter 5 was the best year of his life'" in p.sequence_warnings[0]
+    assert "'Chapter 2' after 'Chapter 5: A misplaced heading'" in p.sequence_warnings[0]
     assert "at line 9" in p.sequence_warnings[0]
 
 
@@ -224,3 +223,41 @@ def test_contents_then_foreword_warns_on_repeated_number():
 def test_en_dash_and_comma_after_numeral():
     hs = ["CHAPTER IV – The Fall", "Chapter V, In Which Things Happen", "Prologue – Dawn"]
     assert headings(novel(*hs)) == hs
+
+
+# --- deferred minors (Phase 1) --------------------------------------------------
+
+def test_number_headings_need_a_terminator():
+    hs = ["Chapter 12: The Fall", "Chapter 13. The Fall", "Chapter 14 - The Fall", "Chapter One",
+          "Chapter Twenty-One", "Chapter 15"]
+    assert headings(novel(*hs)) == hs
+    text = novel("Chapter 1") + ("\nChapter one of my life was over.\n"
+                                 "\nChapter 12 of the regulations forbade it.\n"
+                                 "\nChapter Twenty-One of them came.\n")
+    assert headings(text) == ["Chapter 1"]
+
+
+def test_numbers_above_one_hundred():
+    assert heading_number("Chapter One Hundred One") == 101
+    assert heading_number("Chapter Two Hundred and Twenty-One: End") == 221
+
+
+def test_roman_letter_words_are_not_numerals():
+    text = novel("Chapter 1") + "\nChapter did.\n\nChapter civil, they said.\n"
+    assert headings(text) == ["Chapter 1"]
+    assert heading_number("Chapter XIV.") == 14 and heading_number("chapter xl") == 40
+
+
+def test_short_prologue_kept_when_later_heading_starts_with_prologue():
+    short = " ".join(["w"] * 20)
+    text = novel("Prologue", body=short) + "\n" + novel("Chapter 1", "Prologue: Part Two")
+    assert headings(text) == ["Prologue", "Chapter 1", "Prologue: Part Two"]
+
+
+def test_gutenberg_end_of_line_and_old_small_print():
+    text = ("*END*THE SMALL PRINT! FOR PUBLIC DOMAIN ETEXTS*Ver.04.29.93*END*\n\n" + novel("Chapter 1")
+            + "\nEnd of the Project Gutenberg EBook of Moby Dick\n\n"
+            "*** END OF THE PROJECT GUTENBERG EBOOK MOBY DICK ***\nlicence\n")
+    p = parse_novel(text)
+    assert p.front_words == 7 and p.chapters[0].words == 60 and p.trailing_words == 20
+    assert "Gutenberg" not in p.chapters[0].body

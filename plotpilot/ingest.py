@@ -38,15 +38,20 @@ NUM_WORDS = {
     "eighty": 80, "ninety": 90, "hundred": 100,
 }
 _NW = "|".join(sorted(NUM_WORDS, key=len, reverse=True))
+_ROMAN = r"(?=[ivxlcdm])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"  # valid numerals only
+# All three number forms must end the line or be followed by : . - – — , (then an optional title), so
+# prose such as "Chapter 12 of the regulations forbade it." is not a heading. The group is atomic so
+# "Twenty-One of them" can't backtrack to "Twenty" + "-One of them".
 CHAPTER_RE = re.compile(
     r"^[ \t]*(?:chapter|ch\.)[ \t]*"
-    rf"(?P<num>\d+|[ivxlcdm]+(?=[ \t]*(?:$|[:.,\-–—]))|(?:{_NW})(?:[- ](?:{_NW}))?)"
-    r"\b[^\n]{0,80}$",
+    rf"(?P<num>(?>\d+|{_ROMAN}|(?:{_NW})(?:[- ](?:and[- ])?(?:{_NW}))*))"
+    r"\b(?=[ \t]*(?:$|[:.\-—–,]))[^\n]{0,80}$",
     re.I,
 )
 SIDE_RE = re.compile(r"^[ \t]*(?P<kw>prologue|epilogue)(?:[ \t]*[:.,\-–—][^\n]{0,80})?[ \t]*$", re.I)
-GUT_START_RE = re.compile(r"^\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG", re.I)
-GUT_END_RE = re.compile(r"^\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG", re.I)
+GUT_START_RE = re.compile(r"^(?:\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG|\*END\*THE SMALL PRINT)", re.I)
+GUT_END_RE = re.compile(r"^(?:\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG|[ \t]*END OF (?:THE )?PROJECT GUTENBERG)",
+                        re.I)
 ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
 
 
@@ -80,6 +85,8 @@ def roman_to_int(s: str) -> int:
 def words_to_int(s: str) -> int:
     total = 0
     for tok in re.split(r"[- ]+", s.lower().strip()):
+        if tok == "and":
+            continue
         v = NUM_WORDS[tok]
         total = max(total, 1) * 100 if v == 100 else total + v
     return total
@@ -100,7 +107,12 @@ def heading_number(heading: str) -> int | None:
 def heading_key(heading: str):
     """What a contents entry and its real heading share: the chapter number or the keyword."""
     side = SIDE_RE.match(heading)
-    return side["kw"].lower() if side else heading_number(heading)
+    if not side:
+        return heading_number(heading)
+    # The keyword plus its title, without dot leaders or a page number: "Prologue ..... 1" and
+    # "Prologue" share a key, "Prologue: Part Two" doesn't.
+    title = re.sub(r"[\s.\d]+$", "", heading.strip()[side.end("kw"):])
+    return side["kw"].lower() + re.sub(r"[^a-z]", "", title.lower())
 
 
 def _looks_like_contents(ch: Chapter) -> bool:

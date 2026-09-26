@@ -185,7 +185,7 @@ def test_flags_do_not_carry_to_next_chunk(cwd):
 
 def test_redraft_with_accept_tracker_refused(cwd, capsys):
     code, _ = run("--redraft", "--accept-tracker")
-    assert code == 1 and "can't be combined" in capsys.readouterr().out
+    assert code == 1 and "can't be combined" in capsys.readouterr().err
 
 
 def test_stale_pending_file_from_previous_chunk(cwd):
@@ -342,7 +342,7 @@ def test_redraft_chunk2_uses_prompt4(cwd):
 def test_repair_margin_with_accept_tracker_refused(cwd, capsys):
     _run_with_delta(delta())
     code, client = run("--repair-margin", "--accept-tracker")
-    assert code == 1 and "can't be combined" in capsys.readouterr().out
+    assert code == 1 and "can't be combined" in capsys.readouterr().err
     assert client.calls == [] and status(1) == "tracker_pending"
 
 

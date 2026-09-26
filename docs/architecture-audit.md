@@ -146,18 +146,18 @@ One `python plotpilot.py …` invocation advances the first unfinished chunk as 
 ## 4. Risks and open items
 
 1. **Chapter detection on messy `.txt`.** A heading is a line that is either the first line or follows a blank line, **and** is one of:
-   - `Chapter`/`Ch.` followed by a numeral, a roman numeral (which must end the line or be followed by `: . , - – —`), or a number word such as `Twenty-One`, with the rest of the line ≤80 chars;
+   - `Chapter`/`Ch.` followed by a numeral, a valid roman numeral, or a number word such as `Twenty-One` or `One Hundred and One`. All three forms must end the line or be followed by `: . - – — ,` (then an optional title), with the rest of the line ≤80 chars. So `Chapter one of my life was over.` and `Chapter 12 of the regulations forbade it.` are prose, not headings;
    - `Prologue`/`Epilogue`, optionally followed by punctuation and a title.
 
    If no chapter is found, the run fails with a clear message. A chapter sequence that goes backwards triggers a warning, not a failure. A `--chapter-regex` flag is deferred until a real novel needs it.
 
    Known limits, none fixed in Phase 1:
-   - A roman-numeral heading whose title follows with no punctuation (`CHAPTER IV THE FALL`) is not detected. That chapter merges into the one before it.
+   - A heading whose title follows the number with no punctuation (`CHAPTER IV THE FALL`, `Chapter 12 The Fall`, `Chapter One The Fall`) is not detected, for all three number forms. That chapter merges into the one before it.
    - Bare-number headings (`1.`, `1`) are not detected.
    - `Ch 5` without a period is not detected.
    - `Book One` / `Part One` are deliberately treated as body text, since Part handling is deferred (D1). Books that restart at `Chapter 1` produce a harmless sequence warning at each restart.
    - A heading directly after a scene-break line, with no blank line between them, is not detected.
-   - Digit and number-word headings have no prose guard. A wrapped prose line after a blank line, such as `Chapter one of my life was over.` or `Chapter 12 of the regulations forbade it.`, is taken as a heading. The sequence warning catches it only when the number goes backwards or repeats. Needs a user decision (a guard like the roman-numeral one, or leave as is).
+   - A word that is also a valid roman numeral (`Chapter mix.` = MIX, 1009) is still read as one.
 2. **Scene-break detection.** Lines of three or more `*`, `#`, `~`, `-`, or `=` characters (spaces allowed). If a chunk over 12k words has no scene break, it stays one oversize chunk and a warning is logged.
 3. **Prompt 5 context size.** D1 makes the whole novel one Part, so Prompt 5's input is the whole script. Handled by D17: stop with a clear error. Phase 1 also warns early, using a deterministic estimate (source words × 1.35 tokens per word, as an upper bound on narration size, against the configured generation model's context size). Real Part detection (D1's later version) fixes it properly.
 4. **Haiku fact-check strictness** on ~12k-word chunks may over-flag paraphrases. Handled by D16 (logged, reasoned override).

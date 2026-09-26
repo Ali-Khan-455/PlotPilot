@@ -140,7 +140,7 @@ def test_override(cwd, capsys):
 
 def test_empty_override_reason_refused_before_planning(cwd, capsys):
     code, _ = run("--accept-factcheck= ")
-    assert code == 1 and "non-empty reason" in capsys.readouterr().out
+    assert code == 1 and "non-empty reason" in capsys.readouterr().err
     assert not (cwd / config.DB_PATH).exists()
 
 
