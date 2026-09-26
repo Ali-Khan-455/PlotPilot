@@ -2,6 +2,7 @@
 the splice check (D20), the assembled script, and the scene metadata file (R5)."""
 
 import json
+import re
 from pathlib import Path
 
 import anthropic
@@ -48,7 +49,10 @@ def run_final(conn, llm, prompts, novel_id, slug, title, *, gen_model, qc_model,
         limit, reason = llm.context_limit(gen_model), ""
         try:
             tokens = llm.count_tokens(gen_model, user, system)
-        except anthropic.BadRequestError as e:  # the counting endpoint may refuse an oversize request itself
+        except anthropic.BadRequestError as e:
+            # The counting endpoint may refuse an oversize request itself; any other 400 is surfaced as is.
+            if not re.search(r"(?i)too long|context|exceed", str(e)):
+                raise
             tokens, reason = estimate_tokens(len(user.split()) + len(system.split())), f" (API: {e})"
             limit = -1
         if tokens + config.HOOK_MAX_TOKENS > limit:  # D17

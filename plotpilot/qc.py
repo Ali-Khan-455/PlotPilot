@@ -47,8 +47,10 @@ def _sync_logs(c):
     return paths
 
 
-def _print_tts(text):
-    hazards = tts_hazards(text)
+def _print_tts(text, shown: set):
+    """Print TTS hazards not yet shown in this run (deduplicated by line and kind)."""
+    hazards = [h for h in tts_hazards(text) if (h[0], h[1]) not in shown]
+    shown.update((h[0], h[1]) for h in hazards)
     for line, kind, excerpt in hazards[:MAX_TTS_WARNINGS]:
         print(f"WARNING: TTS hazard line {line} ({kind}): …{excerpt}…")
     if len(hazards) > MAX_TTS_WARNINGS:
@@ -207,7 +209,7 @@ def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
         print(f"Note: --accept-factcheck ignored; your edit to {c.path.name} will be fact-checked first."
               if edited else f"Note: --accept-factcheck ignored; chunk {c.idx} has no failed fact-check.")
         accept = None
-    texture_failed = False
+    texture_failed, tts_shown = False, set()
     while True:
         status = c.status
         body = narration_state(c.conn, c.chunk["id"]).body
@@ -267,7 +269,7 @@ def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
             except ParseError as e:
                 return _malformed(c, "TTS normalization", e)
             c.write()
-            _print_tts(new)
+            _print_tts(new, tts_shown)
 
         elif status == "normalized":
             c.write()
@@ -300,7 +302,7 @@ def run(c, *, accept=None, edited=False, accept_tracker=False) -> int:
 
         elif status == "tracker_pending":
             if not accept_tracker:
-                _print_tts(body)  # shown again on every rerun at the gate
+                _print_tts(body, tts_shown)  # shown again on every rerun at the gate
                 _tracker_gate(c)
                 return 0
             accept_tracker = False

@@ -39,17 +39,19 @@ NUM_WORDS = {
 }
 _NW = "|".join(sorted(NUM_WORDS, key=len, reverse=True))
 _ROMAN = r"(?=[ivxlcdm])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"  # valid numerals only
-# All three number forms must end the line or be followed by : . - – — , (then an optional title), so
-# prose such as "Chapter 12 of the regulations forbade it." is not a heading. The group is atomic so
-# "Twenty-One of them" can't backtrack to "Twenty" + "-One of them".
+# After the number (any of the three forms) the line must end, or continue with : . - – — , ( [ or a
+# quote, or with a word that starts with an uppercase letter ("Chapter 1 The Beginning"). So prose such
+# as "Chapter 12 of the regulations forbade it." is not a heading. The group is atomic so "Twenty-One
+# of them" can't backtrack to "Twenty" + "-One of them".
 CHAPTER_RE = re.compile(
     r"^[ \t]*(?:chapter|ch\.)[ \t]*"
     rf"(?P<num>(?>\d+|{_ROMAN}|(?:{_NW})(?:[- ](?:and[- ])?(?:{_NW}))*))"
-    r"\b(?=[ \t]*(?:$|[:.\-—–,]))[^\n]{0,80}$",
+    r"""\b(?=[^\S\n]*(?:$|[:.\-—–,(\["'“‘])|[^\S\n]+(?-i:[A-Z]))[^\n]{0,80}$""",
     re.I,
 )
+SMALL_PRINT_RE = re.compile(r"^\*END\*THE SMALL PRINT", re.I)
 SIDE_RE = re.compile(r"^[ \t]*(?P<kw>prologue|epilogue)(?:[ \t]*[:.,\-–—][^\n]{0,80})?[ \t]*$", re.I)
-GUT_START_RE = re.compile(r"^(?:\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG|\*END\*THE SMALL PRINT)", re.I)
+GUT_START_RE = re.compile(r"^\*\*\* ?START OF (THE|THIS) PROJECT GUTENBERG", re.I)
 GUT_END_RE = re.compile(r"^(?:\*\*\* ?END OF (THE|THIS) PROJECT GUTENBERG|[ \t]*END OF (?:THE )?PROJECT GUTENBERG)",
                         re.I)
 ROMAN = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
@@ -104,27 +106,45 @@ def heading_number(heading: str) -> int | None:
     return words_to_int(num)
 
 
-def heading_key(heading: str):
-    """What a contents entry and its real heading share: the chapter number or the keyword."""
-    side = SIDE_RE.match(heading)
-    if not side:
-        return heading_number(heading)
-    # The keyword plus its title, without dot leaders or a page number: "Prologue ..... 1" and
-    # "Prologue" share a key, "Prologue: Part Two" doesn't.
+def _side_title(heading: str, side) -> str:
+    """A Prologue/Epilogue title without dot leaders or a page number (arabic, or roman after a leader)."""
     title = re.sub(r"[\s.\d]+$", "", heading.strip()[side.end("kw"):])
-    return side["kw"].lower() + re.sub(r"[^a-z]", "", title.lower())
+    title = re.sub(r"(?:\.{2,}|\s{2,}|\t)[\s.]*[ivxlcdm]+$", "", title, flags=re.I)
+    return re.sub(r"[^a-z0-9]", "", title.lower())
+
+
+def same_heading(a: str, b: str, bare_matches_any: bool = True) -> bool:
+    """A contents entry and its real heading: the same chapter number, or the same Prologue/Epilogue
+    keyword with the same title (a bare "Prologue" matches any titled one when bare_matches_any)."""
+    sa, sb = SIDE_RE.match(a), SIDE_RE.match(b)
+    if sa and sb:
+        ta, tb = _side_title(a, sa), _side_title(b, sb)
+        loose = bare_matches_any and (not ta or not tb)
+        return sa["kw"].lower() == sb["kw"].lower() and (loose or ta == tb)
+    if sa or sb:
+        return False
+    n = heading_number(a)
+    return n is not None and n == heading_number(b)
+
+
+def _heading_dense(ch: Chapter) -> bool:
+    lines = [ln for ln in ch.body.split("\n") if ln.strip()]
+    return bool(lines) and sum(is_heading_line(ln) for ln in lines) / len(lines) >= config.TOC_LINE_RATIO
 
 
 def _looks_like_contents(ch: Chapter) -> bool:
-    if ch.words < config.MIN_CHAPTER_WORDS:
-        return True
-    lines = [ln for ln in ch.body.split("\n") if ln.strip()]
-    return sum(is_heading_line(ln) for ln in lines) / len(lines) >= config.TOC_LINE_RATIO
+    return ch.words < config.MIN_CHAPTER_WORDS or _heading_dense(ch)
 
 
 def parse_novel(text: str) -> Parsed:
     lines = text.split("\n")
-    start = next((i + 1 for i, ln in enumerate(lines) if GUT_START_RE.match(ln)), 0)
+    start = next((i + 1 for i, ln in enumerate(lines) if GUT_START_RE.match(ln)), None)
+    if start is None:
+        # Old etexts end their header with "*END*THE SMALL PRINT"; others put the small print at the end
+        # of the file, so it only counts as a start when it comes before the first heading.
+        first_head = next((i for i, ln in enumerate(lines)
+                           if (i == 0 or not lines[i - 1].strip()) and is_heading_line(ln)), len(lines))
+        start = next((i + 1 for i, ln in enumerate(lines[:first_head]) if SMALL_PRINT_RE.match(ln)), 0)
     end = next((i for i in range(start, len(lines)) if GUT_END_RE.match(lines[i])), len(lines))
     trailing_words = count_words("\n".join(lines[end:]))
 
@@ -146,8 +166,10 @@ def parse_novel(text: str) -> Parsed:
     # is never dropped. The last chapter has no later heading, so something is always kept.
     k = 0
     while k < len(raw) and _looks_like_contents(raw[k]):
-        key = heading_key(raw[k].heading)
-        if not any(heading_key(h.heading) == key for h in raw[k + 1:]):
+        # A bare "Prologue" entry matches a titled one only when it holds no prose (a real contents entry),
+        # so a short real Prologue before a later "Prologue: Part Two" is kept.
+        listing = raw[k].words == 0 or _heading_dense(raw[k])
+        if not any(same_heading(raw[k].heading, h.heading, listing) for h in raw[k + 1:]):
             break
         front_words += count_words(raw[k].heading) + raw[k].words
         k += 1

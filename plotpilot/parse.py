@@ -131,7 +131,7 @@ AUDIT_NO_RE = re.compile(r"(?i)^no\b.*\b(?:found|detected|identified|noted|obser
 AUDIT_END_RE = re.compile(r"(?i)^(?:tts|tone)\b")
 MD_HEADER_RE = re.compile(r"^\s*(?:#|\*\*|\d+[.)]\s*\*\*)")
 BULLET_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
-STEP_ECHO_RE = re.compile(r'(?i)state "PRESENT"|list any|list every|give a final')
+STEP_ECHO_RE = re.compile(r'(?i)state "PRESENT"|list any|list every|give a final|PRESENT\s*/\s*MISSING')
 _WRAP_NOUN = r"(?:narration|text|version|rewrite|script|lines)"
 PREAMBLE_RE = re.compile(
     r"(?i)^(?:(?:sure|okay|ok|certainly|of course|absolutely)\b[!.,]*\s*)?"
@@ -141,7 +141,7 @@ SIGNOFF_RE = re.compile(
     r"(?i)^\s*(?:i )?(?:hope this helps|let me know(?: if[^.!?]*)?|feel free[^.!?]*|happy to help|anything else"
     rf"|end of (?:the )?(?:\w+ )?{_WRAP_NOUN})"
     r"[.!?]?\s*$")
-NOTE_RE = re.compile(r"(?i)^[(\[]?\s*[*_]*note\b")  # a trailing "Note: ..." paragraph, any length
+NOTE_RE = re.compile(r"(?i)^[(\[]?\s*[*_]*note[*_]*\s*:")  # a trailing "Note: ..." paragraph; not "Note to self:"
 
 
 def _strip_md(line: str) -> str:
@@ -196,10 +196,8 @@ def parse_factcheck(text: str) -> Factcheck:
             verdicts.extend(found)
             continue
         if re.search(r"\b(MISSING|INVENTED)\b", c):
-            if re.match(r"(?i)^\s*step \d+", c) and (
-                    STEP_ECHO_RE.search(c) or re.search(r"PRESENT\s*/\s*MISSING", c)
-                    or (MD_HEADER_RE.match(line) and not re.search(r'["“]', c))):
-                continue  # a step header or an echoed instruction, not a flagged line
+            if re.match(r"(?i)^\s*step \d+", c) and STEP_ECHO_RE.search(c):
+                continue  # an echoed instruction, not a flagged line
             flags.append(line.strip())
     if not verdicts:
         raise ParseError("no PASS/FAIL verdict in the fact-check output")
@@ -237,8 +235,9 @@ def check_rewrite(new: str, old: str, min_ratio: float | None = None) -> str:
 
 # A sentence ends at . ! ? (plus an optional closing quote) only when the next non-space character
 # starts a new sentence (uppercase or an opening quote) or the text ends. So 'He said "Run." and left.'
-# stays one sentence. Known limit: abbreviations like "Mr. Smith" split after "Mr.".
-SENTENCE_END_RE = re.compile(r"[.!?][\"”’']?(?=\s+[A-Z\"“‘]|\s*$)")
+# stays one sentence. Common abbreviations (Mr. Mrs. Ms. Dr. St. Jr. Sr. vs. etc.) never end one.
+_ABBREV = "".join(rf"(?<!\b{a})" for a in ("Mr", "Mrs", "Ms", "Dr", "St", "Jr", "Sr", "vs", "etc"))
+SENTENCE_END_RE = re.compile(rf"{_ABBREV}[.!?][\"”’']?(?=\s+[A-Z\"“‘]|\s*$)")
 
 
 def parse_continuation(text: str) -> str:

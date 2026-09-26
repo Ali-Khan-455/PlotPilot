@@ -110,3 +110,20 @@ def test_standin_change_for_existing_character_is_reported():
 
 def test_term_chunk_as_string_is_accepted():
     assert validate_delta(_delta([], chunk="2"))
+
+
+def test_same_name_twice_in_one_delta_with_different_standins():
+    out = merge_collisions(empty(), _delta([("Bo", "the rookie"), ("Bo", "the kid")]))
+    assert out == ["Bo appears twice in this delta ('the rookie', 'the kid'); only 'the rookie' is kept"]
+
+
+def test_progress_reflects_a_split_chapter():
+    from plotpilot.tracker import progress
+    rows = [{"idx": 1, "label": "Ch 1–5", "chapter_start": 1, "chapter_end": 5},
+            {"idx": 2, "label": "Ch 6 (part 1/2)", "chapter_start": 6, "chapter_end": 6},
+            {"idx": 3, "label": "Ch 6 (part 2/2)", "chapter_start": 6, "chapter_end": 6}]
+    assert progress(rows, 1) == "Part 1, Chunk 1 — Chapters 1–5 processed so far"
+    assert progress(rows, 2) == "Part 1, Chunk 2 — Chapters 1–5 and part 1/2 of Chapter 6 processed so far"
+    assert progress(rows, 3) == "Part 1, Chunk 3 — Chapters 1–6 processed so far"
+    solo = [{"idx": 1, "label": "Ch 1 (part 1/3)", "chapter_start": 1, "chapter_end": 1}]
+    assert progress(solo, 1) == "Part 1, Chunk 1 — part 1/3 of Chapter 1 processed so far"

@@ -409,3 +409,19 @@ def test_failed_texture_continues_to_tts(cwd, capsys, p8):
     code, _ = run("--module", "A", replies=[draft(), AUDIT_GAPS, PASS, p8, BODY])
     assert code == 0 and status() == "tracker_pending"
     assert "texture repair failed" in capsys.readouterr().out
+
+
+# --- review of the deferred-minor fixes ---------------------------------------------
+
+def test_tts_warnings_print_once_per_run(cwd, capsys):
+    capsys.readouterr()
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY + " I saw 3 guards."])
+    assert capsys.readouterr().out.count("WARNING: TTS hazard") == 1
+
+
+def test_redraft_records_a_malformed_file_first(cwd):
+    run("--module", "A", replies=[draft(), AUDIT_CLEAN, PASS, BODY])
+    chunk_path(cwd).write_text("my malformed but precious text\n")
+    run("--redraft", replies=[draft("Second margin.")], auto_qc=True)
+    edits = [r for r in rows() if r[0] == "operator_edit"]
+    assert len(edits) == 1 and edits[0][2] == "PARSE_FAILED" and edits[0][4] == "my malformed but precious text\n"

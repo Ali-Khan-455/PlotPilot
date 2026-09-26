@@ -1,3 +1,5 @@
+import pytest
+
 from plotpilot.ingest import count_words, split_scenes
 
 
@@ -261,3 +263,39 @@ def test_gutenberg_end_of_line_and_old_small_print():
     p = parse_novel(text)
     assert p.front_words == 7 and p.chapters[0].words == 60 and p.trailing_words == 20
     assert "Gutenberg" not in p.chapters[0].body
+
+
+# --- review of the deferred-minor fixes ---------------------------------------------
+
+def test_titled_headings_without_punctuation():
+    hs = ["Chapter 1 The Beginning", "CHAPTER 12 THE FALL", "Chapter 13 (continued)", 'Chapter 14 "The Fall"',
+          "Chapter 15 [Draft]", "Chapter Sixteen Home Again", "CHAPTER XVII THE END", "Chapter 18\u00a0The Wait"]
+    assert headings(novel(*hs)) == hs
+    text = novel("Chapter 1") + ("\nChapter 12 of the regulations forbade it.\n"
+                                 "\nChapter one of my life was over.\n\nChapter 12 the fall\n")
+    assert headings(text) == ["Chapter 1"]
+
+
+def test_small_print_at_end_of_file_is_not_a_start():
+    text = (novel("Chapter 1", "Chapter 2") + "\nEnd of the Project Gutenberg EBook of X\n\n"
+            "***START**THE SMALL PRINT!**FOR PUBLIC DOMAIN ETEXTS**START***\nlegal words\n"
+            "*END*THE SMALL PRINT! FOR PUBLIC DOMAIN ETEXTS*Ver.04.29.93*END*\n")
+    assert headings(text) == ["Chapter 1", "Chapter 2"]
+
+
+@pytest.mark.parametrize("toc, real", [
+    (["Prologue ..... ix", "Chapter 1 ..... 1", "Chapter 2 ..... 9"], "Prologue"),
+    (["Prologue", "Chapter 1", "Chapter 2"], "Prologue: The Storm"),
+])
+def test_contents_fold_with_roman_pages_and_bare_entries(toc, real):
+    text = "\n".join(toc) + "\n\n" + novel(real, "Chapter 1", "Chapter 2")
+    assert headings(text) == [real, "Chapter 1", "Chapter 2"]
+
+
+def test_same_heading_rules():
+    from plotpilot.ingest import same_heading
+    assert same_heading("Prologue: Part IX ..... 5", "Prologue: Part IX")
+    assert not same_heading("Prologue: Part IX", "Prologue: Part X")
+    assert same_heading("Prologue", "Prologue: The Storm")
+    assert not same_heading("Prologue (V for Vendetta)", "Prologue (for Vendetta)")
+    assert same_heading("Chapter 3 ..... 17", "CHAPTER III")

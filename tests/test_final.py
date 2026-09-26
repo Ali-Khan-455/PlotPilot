@@ -226,3 +226,16 @@ def test_count_tokens_bad_request_is_d17(cwd, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert code == 1 and client.calls == []
     assert "Prompt 5 requires the full script as context" in out and "prompt is too long" in out
+
+
+def test_other_count_tokens_400_is_surfaced(cwd, capsys, monkeypatch):
+    import anthropic
+    import httpx2
+    req = httpx2.Request("POST", "https://api.anthropic.com")
+    err = anthropic.BadRequestError("messages: invalid content block", response=httpx2.Response(400, request=req),
+                                    body=None)
+    monkeypatch.setattr(FakeClient, "_count_tokens", lambda self, **k: (_ for _ in ()).throw(err))
+    capsys.readouterr()
+    code, _ = all_done()
+    out, errout = capsys.readouterr()
+    assert code == 1 and "context window" not in out and "invalid content block" in errout

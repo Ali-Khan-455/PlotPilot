@@ -105,8 +105,14 @@ def merge_collisions(tracker: dict, delta: dict) -> list[str]:
     and stand-in changes for a known character, which merge ignores (case-insensitive)."""
     used = {_norm(c["standin"]): c["name"] for c in tracker["characters"]}
     known = {_norm(c["name"]): c for c in tracker["characters"]}
-    out = []
+    out, first_in_delta = [], {}
     for c in delta["new_characters"]:
+        prev = first_in_delta.setdefault(_norm(c["name"]), c)
+        if prev is not c:
+            if _norm(prev["standin"]) != _norm(c["standin"]):
+                out.append(f"{c['name']} appears twice in this delta ('{prev['standin']}', '{c['standin']}'); "
+                           f"only '{prev['standin']}' is kept")
+            continue
         old = known.get(_norm(c["name"]))
         if old:
             if _norm(old["standin"]) != _norm(c["standin"]):
@@ -124,8 +130,18 @@ def progress(rows, idx: int) -> str:
     """The tracker's Progress line after chunk idx: the cumulative chapter range."""
     last = next(r for r in rows if r["idx"] == idx)
     start, end = rows[0]["chapter_start"], last["chapter_end"]
-    span = f"Chapter {start}" if start == end else f"Chapters {start}–{end}"
+    part = re.search(r"\(part (\d+)/(\d+)\)", last["label"])
+    if part and part[1] != part[2]:  # the last chapter is only partly done
+        end -= 1
+        partial = f"part {part[1]}/{part[2]} of Chapter {last['chapter_end']}"
+        span = partial if end < start else f"{_span(start, end)} and {partial}"
+    else:
+        span = _span(start, end)
     return f"Part 1, Chunk {idx} — {span} processed so far"
+
+
+def _span(start: int, end: int) -> str:
+    return f"Chapter {start}" if start == end else f"Chapters {start}–{end}"
 
 
 def _items(lines):

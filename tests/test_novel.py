@@ -447,7 +447,7 @@ def test_gate_keeps_unrelated_glob_matches(cwd):
 
 def test_margin_sentences_taken_from_the_draft(cwd):
     from tests.fakes import AUTO_AUDIT, AUTO_PASS
-    margin = "I work for Mr. Smith on his farm."
+    margin = "I farm. I work hard."  # the draft says 1 sentence; count_sentences would say 2
     run("--module", "A", replies=[draft1(margin), AUTO_AUDIT, AUTO_PASS, BODY1, delta()])
     run("--accept-tracker", replies=["B"])
     chunk1 = json.loads(q("SELECT json FROM tracker_versions")[0][0])["chunk1"]

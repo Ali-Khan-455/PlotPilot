@@ -329,7 +329,11 @@ def _run_chunk(c, qc, *, module, redraft, repair, accept, accept_tracker) -> int
             if not redraft:
                 print(f"{e} Fix it, or delete the file to restore the stored text (--redraft also works).")
                 return 1
-            print(f"Note: {c.path.name} can't be read ({e}); --redraft replaces it.")
+            # Keep the operator's text in history (not ok, so it never enters the narration fold).
+            db.add_pass(c.conn, c.novel_id, c.chunk["id"], "operator_edit", None, "",
+                        c.path.read_text(encoding="utf-8"), verdict="PARSE_FAILED",
+                        note="malformed file replaced by --redraft")
+            print(f"Note: {c.path.name} can't be read ({e}); it is stored in history and --redraft replaces it.")
     if accept_tracker and (status_at_start != "tracker_pending" or edited):
         print(f"Note: --accept-tracker ignored; your edit to {c.path.name} will be re-checked and a new "
               "tracker delta produced first." if edited else

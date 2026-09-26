@@ -390,7 +390,7 @@ def test_rewrite_accepts_dash_cliffhanger():
 
 def test_factcheck_step_headers_are_not_flags():
     text = ("**Step 2: PRESENT / MISSING check**\n- The guard reveals the map: MISSING\n"
-            "## Step 3 — INVENTED lines\n- \"I flew.\" INVENTED\nFinal verdict: FAIL")
+            "- \"I flew.\" INVENTED\nFinal verdict: FAIL")
     assert parse_factcheck(text).flags == ["- The guard reveals the map: MISSING", '- "I flew." INVENTED']
 
 
@@ -399,3 +399,28 @@ def test_hook_tts_may_drop_one_word():
     assert check_hook_tts("I was the kid who read each book in the village library.", old, HT)
     with pytest.raises(ParseError):
         check_hook_tts("I was the kid who read books in the village library.", old, HT)
+
+
+# --- review of the deferred-minor fixes ---------------------------------------------
+
+def test_factcheck_flags_on_bold_step_lines_are_kept():
+    text = "**Step 2:** 1. The funeral - MISSING\n**Step 3:** I punched the dragon - INVENTED\nVerdict: FAIL"
+    assert parse_factcheck(text).flags == ["**Step 2:** 1. The funeral - MISSING",
+                                           "**Step 3:** I punched the dragon - INVENTED"]
+
+
+def test_note_to_self_is_narration():
+    check_rewrite(W50 + "\n\nNote to self: never trust a dragon again.", W50)
+    with pytest.raises(ParseError):
+        check_rewrite(W50 + "\n\nNote: I kept the phonetic hint for Kael unchanged as instructed.", W50)
+
+
+@pytest.mark.parametrize("text, n", [("I am Mr. Smith. I live in Ohio.", 2), ("Dr. Kael came. Mrs. Vale left.", 2),
+                                     ("I saw St. Paul, Jr. and Sr. staff vs. rivals. Then I left.", 2)])
+def test_abbreviations_do_not_end_sentences(text, n):
+    assert count_sentences(text) == n
+    assert check_margin(text) is None
+
+
+def test_first_sentence_skips_abbreviations():
+    assert first_sentence("Mr. Smith hired me. I farmed.") == "Mr. Smith hired me."
