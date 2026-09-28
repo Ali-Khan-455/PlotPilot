@@ -8,6 +8,7 @@ import copy
 import re
 
 from imagesync import config
+from imagesync.spec import SpecError
 from plotpilot.parse import ParseError
 
 TAG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
@@ -117,3 +118,86 @@ def merge(bible: dict, delta: dict, chunk_idx: int, *, replace_tags: frozenset[s
                 new_row["slot"] = "fallback"
         b[category].append(new_row)
     return b
+
+
+def _items(lines):
+    return [f"- {x}" for x in lines] or ["- (none yet)"]
+
+
+def _slot_names(b, category):
+    tags = b["slots"][category]
+    if not tags:
+        return "-"
+    by_tag = {row["tag"]: row["name"] for row in b[category]}
+    return ", ".join(by_tag[t] for t in tags)
+
+
+def _entries(rows, *, slotted):
+    if not rows:
+        return ["- (none yet)"]
+    out = []
+    for r in rows:
+        gen = "yes" if r["reference_generated"] else "no"
+        head = f"- {r['name']} | #{r['tag']} | "
+        if slotted:
+            head += f"slot: {r['slot']} | "
+        head += f"reference generated: {gen} |"
+        out.append(head)
+        out.append(f"  locked descriptor: {r['descriptor']} |")
+        out.append(f"  first appeared: chunk {r['first_appeared_chunk']} |")
+        out.append(f"  current state: {r['current_state']}")
+    return out
+
+
+def render(bible: dict, spec, *, title: str) -> str:
+    """The exact `=== VISUAL BIBLE — [title] ===` block from v3's THE VISUAL BIBLE section,
+    field-for-field. Called only from the two places the Bible actually merges: run_stage1's
+    empty-delta-merge branch and approve_refs."""
+    sl = bible["style_lock"]
+    sub_style_name = spec.sub_styles[sl["sub_style"]].split(" — ")[0]
+    genre_label = config.MODULE_TO_COLOR[sl["genre_color_default"]]
+    lines = [
+        f"=== VISUAL BIBLE — {title} ===",
+        "",
+        "STYLE LOCK",
+        f"- Sub-style: ({sl['sub_style']}) {sub_style_name}",
+        f"- Aspect ratio: {sl['aspect']}",
+        f"- Genre color default: {genre_label}",
+        f"- Style anchor image: {sl['anchor_image']}",
+        "",
+        "REFERENCE SLOTS (Flow limit: 5 characters, 14 objects)",
+        f"- Character slots used: {_slot_names(bible, 'characters')}",
+        f"- Object slots used: {_slot_names(bible, 'objects')}",
+        "- Slot policy: locked at chunk 1. Never rotate mid-novel.",
+        "",
+        "CHARACTERS",
+        *_entries(bible["characters"], slotted=True),
+        "",
+        "LOCATIONS",
+        *_entries(bible["locations"], slotted=False),
+        "",
+        "OBJECTS",
+        *_entries(bible["objects"], slotted=True),
+        "",
+        "CONTINUITY LOG (append-only)",
+        *_items(bible["continuity_log"]),
+        "",
+        "REVISION LOG (append-only)",
+        *_items(bible["revision_log"]),
+    ]
+    return "\n".join(lines)
+
+
+def _render_suffix(spec, bible: dict, module: str) -> str:
+    """Fills all three brackets in spec.suffix: the sub-style name (locked at chunk 1), the genre
+    color treatment for the CURRENT chunk's own module (not the Bible's locked default), and the
+    locked aspect ratio."""
+    sl = bible["style_lock"]
+    name = spec.sub_styles[sl["sub_style"]].split(" — ")[0]
+    color = spec.colors[config.MODULE_TO_COLOR[module]]
+    result = spec.suffix.replace("[sub-style descriptor]", name)
+    result = result.replace("[genre color treatment]", color)
+    result = result.replace("[aspect ratio]", sl["aspect"])
+    if "[" in result:
+        raise SpecError(f"locked style suffix still has an unfilled bracket: {result!r}")
+    return result

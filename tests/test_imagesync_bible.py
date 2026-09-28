@@ -1,7 +1,10 @@
 import pytest
 
-from imagesync import bible
+from imagesync import bible, config
+from imagesync.spec import SpecError, load_spec
 from plotpilot.parse import ParseError
+
+SPEC = load_spec()
 
 
 def empty_bible(module="A", sub_style="c", aspect="16:9"):
@@ -193,3 +196,58 @@ def test_merge_never_reassigns_existing_slots_on_second_call():
     d = bible.validate_stage1(delta([ref("character", "Char3")], characters=[bu("Char3")]))
     merged = bible.merge(b, d, chunk_idx=2)
     assert [c["slot"] for c in merged["characters"][:2]] == slots_before
+
+
+# ---- render ----
+
+def test_render_empty_bible_shows_none_yet_placeholders():
+    out = bible.render(empty_bible(), SPEC, title="Book Title")
+    assert "=== VISUAL BIBLE — Book Title ===" in out
+    assert "STYLE LOCK" in out and "CHARACTERS" in out and "LOCATIONS" in out and "OBJECTS" in out
+    assert "CONTINUITY LOG (append-only)" in out and "REVISION LOG (append-only)" in out
+    assert out.count("- (none yet)") >= 4  # characters, locations, objects, continuity log, revision log
+
+
+def test_render_genre_color_resolves_letter_to_label():
+    out = bible.render(empty_bible(module="A"), SPEC, title="Book")
+    assert "Genre color default: Isekai/power fantasy" in out
+    assert "Genre color default: A" not in out
+
+
+def test_render_sub_style_shows_letter_and_name():
+    out = bible.render(empty_bible(sub_style="c"), SPEC, title="Book")
+    assert "Sub-style: (c) Fantasy adventure manhwa" in out
+
+
+def test_render_populated_character_row():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=2)
+    out = bible.render(b, SPEC, title="Book")
+    assert "Char1" in out and "#Char1" in out and "slot: 1" in out
+    assert "reference generated: yes" in out
+    assert "first appeared: chunk 2" in out
+    assert "current state: clean" in out
+
+
+# ---- _render_suffix ----
+
+def test_render_suffix_fills_all_three_brackets():
+    b = empty_bible(module="A", sub_style="c", aspect="16:9")
+    out = bible._render_suffix(SPEC, b, module="A")
+    assert "[" not in out
+    assert "Fantasy adventure manhwa" in out
+    assert SPEC.colors[config.MODULE_TO_COLOR["A"]] in out
+    assert "16:9" in out
+
+
+def test_render_suffix_uses_current_chunk_module_not_locked_default():
+    b = empty_bible(module="A", sub_style="c", aspect="16:9")
+    out = bible._render_suffix(SPEC, b, module="B")
+    assert SPEC.colors[config.MODULE_TO_COLOR["B"]] in out
+    assert SPEC.colors[config.MODULE_TO_COLOR["A"]] not in out
+
+
+def test_render_suffix_raises_on_leftover_bracket(monkeypatch):
+    bad_spec = SPEC.__class__(**{**SPEC.__dict__, "suffix": SPEC.suffix + " [extra bracket]"})
+    b = empty_bible()
+    with pytest.raises(SpecError):
+        bible._render_suffix(bad_spec, b, module="A")
