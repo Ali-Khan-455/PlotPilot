@@ -119,3 +119,25 @@ def check_wide_under_9_16(items: list[dict], aspect: str) -> list[str]:
 
 def build_manifest_rows(entries: list[tuple[str, dict]]) -> list[tuple[str, str, str]]:
     return [(beat_timecode, item["shot_type"], " ".join(item["scene"].split()[:5])) for beat_timecode, item in entries]
+
+
+def expected_filenames(rows: list[tuple[str, str, str]]) -> list[str]:
+    """Q9's disambiguation rule over one chunk's own manifest rows (timecode, shot_type, first_5_words),
+    in row order: beat_<tc>.png for a display timecode's first occurrence in this list, beat_<tc>_2.png
+    for its second, beat_<tc>_3.png for its third, etc. `tc` is the manifest's own timecode column,
+    which already includes any split-suffix letter (e.g. "04-15a") -- disambiguation is against that
+    full display string, not the bare numeric base. This is the only convention the original v3 spec's
+    own worked example (image-sync-v3.md HOW TO USE step 5) actually specifies; that example never shows
+    a split-suffixed beat that ALSO has a duplicate base timecode, but the combination is concretely
+    reachable, not merely hypothetical -- two different scenes, each independently split into lettered
+    beats, can share one base timecode via PlotPilot's own unfound-scene fallback (Q9), giving two beats
+    both named e.g. "04-15a" in one chunk's own manifest rows. 'beat_04-15a_2.png' (append _N after the
+    full display string) is this plan's own explicit choice for resolving that reachable compound case,
+    not a pre-existing rule the spec already states."""
+    seen: dict[str, int] = {}
+    names = []
+    for tc, _shot_type, _first_5_words in rows:
+        seen[tc] = seen.get(tc, 0) + 1
+        n = seen[tc]
+        names.append(f"beat_{tc}.png" if n == 1 else f"beat_{tc}_{n}.png")
+    return names

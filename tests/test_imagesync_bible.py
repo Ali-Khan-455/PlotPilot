@@ -172,6 +172,32 @@ def test_merge_replace_tags_updates_matching_category_row_in_place():
     assert len(merged["characters"]) == 1
 
 
+def test_merge_replace_tags_appends_one_revision_log_line_with_correct_arrow():
+    original = bible.validate_stage1(delta([ref("character", "Char1", "old descriptor")],
+                                            characters=[bu("Char1", name="Old Name",
+                                                          descriptor="old descriptor")]))
+    b = bible.merge(empty_bible(), original, chunk_idx=1)
+    d = bible.validate_stage1(delta([ref("character", "Char1", "new descriptor")],
+                                    characters=[bu("Char1", name="New Name", descriptor="new descriptor")]))
+    merged = bible.merge(b, d, chunk_idx=2, replace_tags=frozenset({"Char1"}))
+    assert len(merged["revision_log"]) == 1
+    line = merged["revision_log"][0]
+    assert "[chunk 2]" in line and "#Char1" in line
+    assert "Old Name (old descriptor)" in line and "New Name (new descriptor)" in line
+    assert "→" in line  # the same arrow merge_continuity uses, not "->"
+
+
+def test_merge_replace_tags_no_op_replace_appends_no_line():
+    original = bible.validate_stage1(delta([ref("character", "Char1", "same descriptor")],
+                                            characters=[bu("Char1", name="Same Name",
+                                                          descriptor="same descriptor")]))
+    b = bible.merge(empty_bible(), original, chunk_idx=1)
+    d = bible.validate_stage1(delta([ref("character", "Char1", "same descriptor")],
+                                    characters=[bu("Char1", name="Same Name", descriptor="same descriptor")]))
+    merged = bible.merge(b, d, chunk_idx=2, replace_tags=frozenset({"Char1"}))
+    assert merged["revision_log"] == []
+
+
 def test_merge_replace_tags_wrong_category_raises():
     b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
     d = bible.validate_stage1(delta([ref("location", "Char1", "new descriptor")],

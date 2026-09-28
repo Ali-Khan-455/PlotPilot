@@ -135,8 +135,17 @@ def merge(bible: dict, delta: dict, chunk_idx: int, *, replace_tags: frozenset[s
             # --regenerate only fixes a reference's appearance, never its story-state (the continuity
             # log, via merge_continuity, is the sole authority for current_state) -- so a replace here
             # never touches current_state, slot, or first_appeared_chunk.
+            old_name, old_descriptor = existing["name"], existing["descriptor"]
             existing["name"] = item["name"]
             existing["descriptor"] = item["descriptor"]
+            if old_name != item["name"] or old_descriptor != item["descriptor"]:
+                # existing["tag"] (the Bible's own canonical spelling), not r["tag"] (the delta's own
+                # spelling) -- matching merge_continuity's own precedent of always logging the Bible's
+                # canonical form. No beat identity is available at merge time (a regenerate isn't
+                # beat-scoped), so this omits the "| beat M-SS" segment merge_continuity's lines carry.
+                b["revision_log"].append(
+                    f"[chunk {chunk_idx}] #{existing['tag']} {old_name} ({old_descriptor}) "
+                    f"→ {item['name']} ({item['descriptor']})")
             continue
         all_tags = {_norm(row["tag"]) for cat in ("characters", "locations", "objects") for row in b[cat]}
         if norm_tag in all_tags:

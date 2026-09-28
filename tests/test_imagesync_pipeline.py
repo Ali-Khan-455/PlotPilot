@@ -126,6 +126,139 @@ def _setup(conn, beats_per_chunk, module="A"):
     return nid, db.chunks(conn, nid), chunks, src
 
 
+def test_batch_progress_selects_highest_batch_index_not_newest_insert(conn, chunk):
+    """R1-2's own direct regression test: insert batch 2's stage2 pass BEFORE batch 1's (simulating what
+    a later re-emission produces), and confirm _batch_progress/_stage2_continues_seed report the state a
+    highest-batch_index read gives, not a newest-insert read."""
+    nid, cid = chunk
+    note2 = json.dumps({"start": 30, "count": 30, "batch_index": 2, "tail": ["wide"]})
+    db.add_pass(conn, nid, cid, "stage2", "m", "u2", "o2", note=note2)
+    note1 = json.dumps({"start": 0, "count": 30, "batch_index": 1, "tail": ["medium"]})
+    db.add_pass(conn, nid, cid, "stage2", "m", "u1", "o1", note=note1)
+    next_start, next_batch_index, tail = _batch_progress(conn, cid)
+    assert (next_start, next_batch_index, tail) == (60, 3, ["wide"])
+
+
+def test_batch_containing_before_inside_after_and_across_two_batches(conn, chunk):
+    nid, cid = chunk
+    note1 = json.dumps({"start": 0, "count": 30, "batch_index": 1, "tail": []})
+    db.add_pass(conn, nid, cid, "stage2", "m", "u1", "o1", note=note1)
+    note2 = json.dumps({"start": 30, "count": 10, "batch_index": 2, "tail": []})
+    db.add_pass(conn, nid, cid, "stage2", "m", "u2", "o2", note=note2)
+    from imagesync.pipeline import _batch_containing
+    assert _batch_containing(conn, cid, 0)["batch_index"] == 1
+    assert _batch_containing(conn, cid, 29)["batch_index"] == 1
+    assert _batch_containing(conn, cid, 30)["batch_index"] == 2
+    assert _batch_containing(conn, cid, 39)["batch_index"] == 2
+    assert _batch_containing(conn, cid, 40) is None
+
+
+def test_batch_containing_none_when_no_batches_stored(conn, chunk):
+    nid, cid = chunk
+    from imagesync.pipeline import _batch_containing
+    assert _batch_containing(conn, cid, 0) is None
+
+
+def test_run_stage1_gates_from_refs_approved_not_just_beats(cwd):
+    """R1-3's own regression test: a post-batch revision calls run_stage1 on a chunk already at
+    refs_approved (or bible_pending) -- the new-references gate must still fire; the pre-IS-5 code only
+    ever set refs_pending from status == "beats"."""
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1])
+    row, chunk = rows[0], chunks[0]
+    from tests.helpers import one_new_character
+    client = FakeClient([one_new_character("Kael")])
+    llm = LLM(client, "logs")
+    from imagesync.pipeline import run_stage1
+    assert row["status"] == "refs_approved"
+    assert run_stage1(conn, llm, SPEC, src, nid, row, chunk, stage1_model="m", slug="book") == 0
+    new_status = db.chunks(conn, nid)[0]["status"]
+    assert new_status == "refs_pending"
+    conn.close()
+
+
+def test_run_stage1_post_batch_revision_note_key(cwd):
+    """post_batch_revision, when given, folds a "revise_beat" key into the stored refs pass's note;
+    every existing call site (which passes nothing) gets a byte-identical note otherwise."""
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1])
+    row, chunk = rows[0], chunks[0]
+    from tests.helpers import one_new_character
+    client = FakeClient([one_new_character("Kael")])
+    llm = LLM(client, "logs")
+    from imagesync.pipeline import run_stage1
+    assert run_stage1(conn, llm, SPEC, src, nid, row, chunk, stage1_model="m", slug="book",
+                      post_batch_revision=(0, "")) == 0
+    note = json.loads(is_passes_note(conn, row["id"], "refs"))
+    assert note["revise_beat"] == {"scene_index": 0, "suffix": ""}
+    conn.close()
+
+
+def is_passes_note(conn, chunk_id, kind):
+    row = conn.execute("SELECT note FROM passes WHERE chunk_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                       (chunk_id, kind)).fetchone()
+    return row["note"]
+
+
+def test_run_revise_batch_re_emits_only_its_own_batch(cwd):
+    """run_revise_batch re-emits only the batch its batch_note names -- other stored batches' own files
+    stay byte-unchanged -- and _batch_progress still reports the chunk's true (unchanged) completion
+    state afterward, proving R1-2's fix and this new caller compose correctly."""
+    from imagesync.pipeline import _batch_containing, run_revise_batch
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [40])
+    row, chunk = rows[0], chunks[0]
+    batch1, batch2 = chunk.scenes[:30], chunk.scenes[30:]
+    client = FakeClient([stage2_reply(batch1), stage2_reply(batch2)])
+    llm = LLM(client, "logs")
+    assert run_stage2(conn, llm, SPEC, src, nid, row, chunk, gen_model="m", slug="book") == 0
+    assert run_stage2(conn, llm, SPEC, src, nid, row, chunk, gen_model="m", slug="book") == 0
+    out_dir = Path("images") / "book" / "chunk-01"
+    batch1_bytes_before = (out_dir / "batch-1.txt").read_bytes()
+    batch2_bytes_before = (out_dir / "batch-2.txt").read_bytes()
+
+    batch1_note = _batch_containing(conn, row["id"], 0)
+    assert batch1_note["batch_index"] == 1
+    revise_client = FakeClient([stage2_reply(batch1, genre_override="B")])
+    llm2 = LLM(revise_client, "logs")
+    assert run_revise_batch(conn, llm2, SPEC, src, nid, row, chunk, batch1_note, gen_model="m",
+                            slug="book") == 0
+
+    assert (out_dir / "batch-1.txt").read_bytes() != batch1_bytes_before
+    assert (out_dir / "batch-2.txt").read_bytes() == batch2_bytes_before  # untouched
+    start, batch_index, _ = _batch_progress(conn, row["id"])
+    assert (start, batch_index) == (40, 3)  # unchanged true completion state
+    conn.close()
+
+
+def test_run_revise_batch_batch1_uses_continues_seed_tail(cwd):
+    """A revise-batch call on batch 1 of chunk 2, whose first beat continues the previous chunk, still
+    gets the CONTINUES seed tail -- the same derivation run_stage2's own batch 1 uses."""
+    from imagesync.pipeline import _batch_containing, run_revise_batch
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1, 1])
+    row1, chunk1 = rows[0], chunks[0]
+    row2, chunk2 = rows[1], chunks[1]
+    client = FakeClient([stage2_reply(chunk1.scenes)])
+    llm = LLM(client, "logs")
+    assert run_stage2(conn, llm, SPEC, src, nid, row1, chunk1, gen_model="m", slug="book") == 0
+    # give chunk 2's stored beats a continues value pointing back at chunk 1's last beat
+    conn.execute("UPDATE passes SET note = ? WHERE chunk_id = ? AND kind = 'beats'",
+                (json.dumps({"identity": [{"scene_index": 0, "suffix": "", "continues": "01-00"}]}),
+                 row2["id"]))
+    client2 = FakeClient([stage2_reply(chunk2.scenes)])
+    llm2 = LLM(client2, "logs")
+    assert run_stage2(conn, llm2, SPEC, src, nid, row2, chunk2, gen_model="m", slug="book") == 0
+    batch_note = _batch_containing(conn, row2["id"], 0)
+    revise_client = FakeClient([stage2_reply(chunk2.scenes, genre_override="B")])
+    llm3 = LLM(revise_client, "logs")
+    assert run_revise_batch(conn, llm3, SPEC, src, nid, row2, chunk2, batch_note, gen_model="m",
+                            slug="book") == 0
+    msg = revise_client.calls[0]["messages"][0]["content"]
+    assert "CONTINUES" in msg
+    conn.close()
+
+
 def test_run_stage2_multi_batch_and_previous_batch_context(cwd):
     conn = db.connect("i.db")
     nid, rows, chunks, src = _setup(conn, [35])
@@ -565,4 +698,125 @@ def test_run_regenerate_refused_once_stage2_batches_exist(cwd):
     code = run_regenerate(conn, LLM(FakeClient([]), "logs"), SPEC, src, nid, row, chunk, "#Kael: reason",
                           stage1_model="m", slug="book")
     assert code == 1
+    conn.close()
+
+
+# --- check_images (IS-5) ------------------------------------------------------
+
+def _drive_stage2_and_mark_done(conn, nid, row, chunk, src):
+    llm = LLM(FakeClient([stage2_reply(chunk.scenes)]), "logs")
+    assert run_stage2(conn, llm, SPEC, src, nid, row, chunk, gen_model="m", slug="book") == 0
+    db.set_chunk_status(conn, row["id"], "done")
+    return db.chunks(conn, nid)[chunk.idx - 1]
+
+
+def test_check_images_reports_missing_and_extra_files(cwd):
+    from imagesync.pipeline import check_images
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [2])
+    row, chunk = rows[0], chunks[0]
+    row = _drive_stage2_and_mark_done(conn, nid, row, chunk, src)
+    out_dir = Path("images") / "book" / "chunk-01"
+    for f in out_dir.glob("*.png"):
+        f.unlink()
+    (out_dir / "beat_00-00.png").write_bytes(b"")  # present, expected -- no finding
+    (out_dir / "unexpected.png").write_bytes(b"")  # present, not expected -- extra
+
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = check_images(conn, nid, src, slug="book", images_dir=Path("images"))
+    assert code == 0
+    out = buf.getvalue()
+    assert "missing: beat_01-00.png" in out
+    assert "extra: unexpected.png" in out
+    assert "missing: beat_00-00.png" not in out
+    conn.close()
+
+
+def test_check_images_chunk_filter_narrows_to_one_chunk(cwd):
+    from imagesync.pipeline import check_images
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1, 1])
+    row1, chunk1 = rows[0], chunks[0]
+    row2, chunk2 = rows[1], chunks[1]
+    _drive_stage2_and_mark_done(conn, nid, row1, chunk1, src)
+    _drive_stage2_and_mark_done(conn, nid, row2, chunk2, src)
+    for f in (Path("images") / "book" / "chunk-01").glob("*.png"):
+        f.unlink()
+    for f in (Path("images") / "book" / "chunk-02").glob("*.png"):
+        f.unlink()
+
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = check_images(conn, nid, src, slug="book", images_dir=Path("images"), chunk_filter=1)
+    assert code == 0
+    out = buf.getvalue()
+    assert "Chunk 1:" in out
+    assert "Chunk 2:" not in out
+    conn.close()
+
+
+def test_check_images_chunk_filter_naming_non_done_chunk_reports_clearly(cwd):
+    from imagesync.pipeline import check_images
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1])  # status "refs_approved", not "done"
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = check_images(conn, nid, src, slug="book", images_dir=Path("images"), chunk_filter=1)
+    assert code == 0
+    assert "isn't done yet" in buf.getvalue()
+
+    buf2 = io.StringIO()
+    with redirect_stdout(buf2):
+        code2 = check_images(conn, nid, src, slug="book", images_dir=Path("images"), chunk_filter=99)
+    assert code2 == 0
+    assert "No chunk 99" in buf2.getvalue()
+    conn.close()
+
+
+def test_check_images_images_dir_override_is_honored(cwd):
+    from imagesync.pipeline import check_images
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1])
+    row, chunk = rows[0], chunks[0]
+    _drive_stage2_and_mark_done(conn, nid, row, chunk, src)
+    alt_dir = Path("alt-images")
+    (alt_dir / "book" / "chunk-01").mkdir(parents=True)
+    (alt_dir / "book" / "chunk-01" / "beat_00-00.png").write_bytes(b"")
+
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = check_images(conn, nid, src, slug="book", images_dir=alt_dir)
+    assert code == 0
+    assert "No missing or extra images." in buf.getvalue()
+    conn.close()
+
+
+def test_check_images_default_scope_aggregates_every_done_chunk(cwd):
+    from imagesync.pipeline import check_images
+    conn = db.connect("i.db")
+    nid, rows, chunks, src = _setup(conn, [1, 1])
+    row1, chunk1 = rows[0], chunks[0]
+    _drive_stage2_and_mark_done(conn, nid, row1, chunk1, src)
+    # chunk 2 stays at refs_approved (not done) -- excluded from the default scope
+    for f in (Path("images") / "book" / "chunk-01").glob("*.png"):
+        f.unlink()
+
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = check_images(conn, nid, src, slug="book", images_dir=Path("images"))
+    assert code == 0
+    out = buf.getvalue()
+    assert "Chunk 1:" in out
+    assert "Chunk 2:" not in out
     conn.close()
