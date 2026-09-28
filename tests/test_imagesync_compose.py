@@ -2,7 +2,7 @@ import pytest
 
 from imagesync.beats import Beat
 from imagesync.compose import (build_manifest_rows, check_refs, check_shot_cadence, check_wide_under_9_16,
-                               compose_prompt, validate_stage2)
+                               compose_prompt, expected_filenames, validate_stage2)
 from plotpilot.parse import ParseError
 
 BIBLE = {
@@ -206,3 +206,30 @@ def test_build_manifest_rows_preserves_order():
     entries = [("01-00", item(scene="first")), ("02-00", item(scene="second"))]
     rows = build_manifest_rows(entries)
     assert [r[0] for r in rows] == ["01-00", "02-00"]
+
+
+# --- expected_filenames --------------------------------------------------------
+
+def test_expected_filenames_no_repeats_is_an_identity_mapping():
+    rows = [("01-00", "wide", "a"), ("02-00", "medium", "b")]
+    assert expected_filenames(rows) == ["beat_01-00.png", "beat_02-00.png"]
+
+
+def test_expected_filenames_repeated_timecode_gets_numbered_suffix_in_row_order():
+    rows = [("04-15", "wide", "a"), ("04-15", "medium", "b"), ("04-15", "close", "c")]
+    assert expected_filenames(rows) == ["beat_04-15.png", "beat_04-15_2.png", "beat_04-15_3.png"]
+
+
+def test_expected_filenames_split_suffix_with_duplicate_base_gets_compound_form():
+    # two different scenes, each split into lettered beats, sharing one base timecode
+    rows = [("04-15a", "wide", "a"), ("04-15b", "medium", "b"),
+           ("04-15a", "close", "c"), ("04-15b", "wide", "d")]
+    assert expected_filenames(rows) == ["beat_04-15a.png", "beat_04-15b.png",
+                                        "beat_04-15a_2.png", "beat_04-15b_2.png"]
+
+
+def test_expected_filenames_disambiguates_each_chunks_rows_independently():
+    chunk1_rows = [("01-00", "wide", "a"), ("01-00", "medium", "b")]
+    chunk2_rows = [("01-00", "wide", "a")]
+    assert expected_filenames(chunk1_rows) == ["beat_01-00.png", "beat_01-00_2.png"]
+    assert expected_filenames(chunk2_rows) == ["beat_01-00.png"]  # not "_3" -- independent count

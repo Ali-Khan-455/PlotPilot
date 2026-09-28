@@ -8,6 +8,7 @@ import imagesync.config as is_config
 import plotpilot.config as pp_config
 from imagesync import db as is_db
 from imagesync.cli import main
+from plotpilot.llm import LLM, LLMError
 from tests.fakes import FakeClient
 from tests.helpers import (beats_reply, continuity_reply, draft1, finish_novel, one_new_character,
                           refs_reply, run, stage2_reply)
@@ -716,6 +717,268 @@ def test_bible_pending_rerun_via_cli_makes_zero_calls_and_reprints(cwd, capsys):
     assert im(client=client2) == 0
     assert client2.calls == []
     assert "--accept-bible" in capsys.readouterr().out
+
+
+# --- Post-batch revision, --check-images, and the deferred revision-log write (IS-5) ----------------
+
+
+def _drive_to_bible_pending(cwd, scenes=None, refs_reply_=None):
+    finish_novel(cwd)
+    scenes = scenes or CHUNK1_SCENES
+    client = FakeClient([beats_reply(scenes), refs_reply_ or refs_reply(), stage2_reply(scenes),
+                        continuity_reply()])
+    assert im("--sub-style", "c", client=client) == 0
+    assert chunk_status(1) == "bible_pending"
+    return client
+
+
+def _pipeline_args(cwd):
+    """(conn, novel_id, chunk_row, spec, src, chunk) for calling run_revise_beat/approve_refs directly,
+    the same objects imagesync.cli.main assembles for its own dispatch."""
+    from imagesync.source import load_novel, open_plotpilot
+    from imagesync.spec import load_spec
+    conn = is_conn()
+    novel_id = conn.execute("SELECT id FROM novels").fetchone()[0]
+    chunk_row = dict(is_db.chunks(conn, novel_id)[0])
+    spec = load_spec()
+    src = load_novel(open_plotpilot(pp_config.DB_PATH), "book")
+    return conn, novel_id, chunk_row, spec, src, src.chunks[0]
+
+
+def test_run_revise_beat_no_new_element_re_emits_immediately(cwd):
+    from imagesync.pipeline import run_revise_beat
+    _drive_to_bible_pending(cwd)
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None), refs_reply(), stage2_reply(CHUNK1_SCENES)])
+    llm = LLM(client, "logs")
+    code = run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00", "new description",
+                           gen_model="m", stage1_model="m", slug="book")
+    assert code == 0
+    assert len(client.calls) == 3
+    assert is_db.chunks(conn, novel_id)[0]["status"] == "refs_approved"  # regressed from bible_pending
+    conn.close()
+
+
+def test_run_revise_beat_new_element_gates_then_approve_refs_auto_continues(cwd):
+    from imagesync.pipeline import approve_refs, run_revise_beat
+    _drive_to_bible_pending(cwd)
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None),
+                        one_new_character("Kael", "a tall elder")])
+    llm = LLM(client, "logs")
+    code = run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00", "new description",
+                           gen_model="m", stage1_model="m", slug="book")
+    assert code == 0
+    row = is_db.chunks(conn, novel_id)[0]
+    assert row["status"] == "refs_pending"
+    assert not (Path(is_config.CONTINUITY_PENDING_DIR)).exists() or \
+        list(Path(is_config.CONTINUITY_PENDING_DIR).glob("*")) == []
+    batch_file = Path("images") / "book" / "chunk-01" / "batch-1.txt"
+    text_before = batch_file.read_text()
+
+    approve_client = FakeClient([stage2_reply(CHUNK1_SCENES, genre_override="B")])
+    llm2 = LLM(approve_client, "logs")
+    row = dict(row)
+    code = approve_refs(conn, novel_id, row, spec=spec, slug="book", title=src.title,
+                        llm=llm2, src=src, chunk=chunk, gen_model="m")
+    assert code == 0
+    assert len(approve_client.calls) == 1
+    # the batch was genuinely re-emitted (genre_override="B" changes the composed suffix), and the newest
+    # ok stage2 pass is still batch_index 1 -- the auto-continue re-emitted the SAME batch, not a new one
+    text_after = batch_file.read_text()
+    assert text_after != text_before
+    note = json.loads(is_db.ok_passes(conn, chunk_row["id"], ["stage2"])[-1]["note"])
+    assert note["batch_index"] == 1
+    conn.close()
+
+
+def test_run_revise_beat_r1_7_refusal_when_already_refs_pending(cwd):
+    """Revising a second already-batched beat while a first's gate is still open makes zero calls."""
+    from imagesync.pipeline import run_revise_beat
+    _drive_to_bible_pending(cwd)
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None),
+                        one_new_character("Kael", "a tall elder")])
+    llm = LLM(client, "logs")
+    assert run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00", "new description",
+                           gen_model="m", stage1_model="m", slug="book") == 0
+    row = dict(is_db.chunks(conn, novel_id)[0])
+    assert row["status"] == "refs_pending"
+    client2 = FakeClient([])
+    llm2 = LLM(client2, "logs")
+    code = run_revise_beat(conn, llm2, spec, src, novel_id, row, chunk, "00-00", "another description",
+                           gen_model="m", stage1_model="m", slug="book")
+    assert code == 1
+    assert client2.calls == []
+    conn.close()
+
+
+def test_run_revise_beat_recovery_message_prints_exact_revise_arg_not_bare_timecode(cwd):
+    """User regression test (post-round-3, direct review): --revise-beat 00-00_2, on the duplicate-
+    timecode fixture, against a forced run_revise_batch failure -- the printed recovery message must
+    contain the full --revise-beat 00-00_2 argument, never the bare, ambiguous 00-00."""
+    from imagesync.pipeline import run_revise_beat
+    finish_novel(cwd)
+    _duplicate_chunk1_scenes()
+    dup_scenes = [("00-00", "a"), ("00-00", "b")]
+    client = FakeClient([beats_reply(dup_scenes), refs_reply(), stage2_reply(dup_scenes), continuity_reply()])
+    assert im("--sub-style", "c", client=client) == 0
+    assert chunk_status(1) == "bible_pending"
+
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    # a malformed-twice reply forces run_revise_batch (via run_revise_beat's own step 9) to fail
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None), refs_reply(),
+                        "not json", "still not json"])
+    llm = LLM(client, "logs")
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00_2",
+                               "new description", gen_model="m", stage1_model="m", slug="book")
+    assert code == 1
+    out = buf.getvalue()
+    assert "--revise-beat 00-00_2 \"" in out
+    assert "--revise-beat 00-00 \"" not in out
+    conn.close()
+
+
+def test_approve_refs_auto_continue_recovery_message_names_scene_index(cwd):
+    from imagesync.pipeline import approve_refs, run_revise_beat
+    _drive_to_bible_pending(cwd)
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None),
+                        one_new_character("Kael", "a tall elder")])
+    llm = LLM(client, "logs")
+    assert run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00", "new description",
+                           gen_model="m", stage1_model="m", slug="book") == 0
+    row = dict(is_db.chunks(conn, novel_id)[0])
+    approve_client = FakeClient(["not json", "still not json"])
+    llm2 = LLM(approve_client, "logs")
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = approve_refs(conn, novel_id, row, spec=spec, slug="book", title=src.title,
+                            llm=llm2, src=src, chunk=chunk, gen_model="m")
+    assert code == 1
+    out = buf.getvalue()
+    assert "scene index 0" in out
+    conn.close()
+
+
+class _RaisingLLM(LLM):
+    """Delegates every call to the real flow except `kind`, which raises LLMError directly -- this is
+    what run_revise_batch's own attempt() call does on a genuine API failure (e.g. a max_tokens stop),
+    the exact shape R2-1 found the first draft's recovery message missing."""
+    def __init__(self, client, log_dir, kind):
+        super().__init__(client, log_dir)
+        self._raise_kind = kind
+
+    def call(self, kind, model, user, **kw):
+        if kind == self._raise_kind:
+            raise LLMError("boom", text="", stop_reason="max_tokens")
+        return super().call(kind, model, user, **kw)
+
+
+def test_run_revise_beat_recovery_message_prints_on_raised_llmerror(cwd):
+    """The R2-1 gap: attempt() re-raises (never returns) on a genuine API failure. The recovery message
+    must still print before the exception propagates -- a first draft only handled a returned non-zero
+    code."""
+    from imagesync.pipeline import run_revise_beat
+    _drive_to_bible_pending(cwd)
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None), refs_reply()])
+    llm = _RaisingLLM(client, "logs", "stage2")
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with pytest.raises(LLMError), redirect_stdout(buf):
+        run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00", "new description",
+                        gen_model="m", stage1_model="m", slug="book")
+    out = buf.getvalue()
+    assert "--revise-beat 00-00 \"" in out
+    conn.close()
+
+
+def test_approve_refs_auto_continue_recovery_message_prints_on_raised_llmerror(cwd):
+    from imagesync.pipeline import approve_refs, run_revise_beat
+    _drive_to_bible_pending(cwd)
+    conn, novel_id, chunk_row, spec, src, chunk = _pipeline_args(cwd)
+    client = FakeClient([beats_reply([("00-00", "b")], continues=None),
+                        one_new_character("Kael", "a tall elder")])
+    llm = LLM(client, "logs")
+    assert run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, "00-00", "new description",
+                           gen_model="m", stage1_model="m", slug="book") == 0
+    row = dict(is_db.chunks(conn, novel_id)[0])
+    approve_client = FakeClient([])
+    llm2 = _RaisingLLM(approve_client, "logs", "stage2")
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with pytest.raises(LLMError), redirect_stdout(buf):
+        approve_refs(conn, novel_id, row, spec=spec, slug="book", title=src.title,
+                    llm=llm2, src=src, chunk=chunk, gen_model="m")
+    out = buf.getvalue()
+    assert "scene index 0" in out
+    conn.close()
+
+
+def test_check_images_cli_wiring_reports_missing_and_extra(cwd, capsys):
+    _drive_to_bible_pending(cwd)
+    assert im("--accept-bible", client=FakeClient([])) == 0
+    for f in (Path("images") / "book" / "chunk-01").glob("*.png"):
+        f.unlink()
+    capsys.readouterr()
+    assert im("--check-images", client=FakeClient([])) == 0
+    out = capsys.readouterr().out
+    assert "missing: beat_00-00.png" in out
+
+
+def test_check_images_chunk_flag_cli_wiring(cwd, capsys):
+    _drive_to_bible_pending(cwd)
+    assert im("--accept-bible", client=FakeClient([])) == 0
+    for f in (Path("images") / "book" / "chunk-01").glob("*.png"):
+        f.unlink()
+    capsys.readouterr()
+    assert im("--check-images", "--chunk", "1", client=FakeClient([])) == 0
+    out = capsys.readouterr().out
+    assert "Chunk 1:" in out
+    assert "missing: beat_00-00.png" in out
+
+
+def test_check_images_images_dir_flag_cli_wiring(cwd, capsys):
+    _drive_to_bible_pending(cwd)
+    assert im("--accept-bible", client=FakeClient([])) == 0
+    capsys.readouterr()
+    assert im("--check-images", "--images-dir", "alt-images", client=FakeClient([])) == 0
+    out = capsys.readouterr().out
+    assert "missing:" in out  # alt-images/book/chunk-01 doesn't exist -- everything's missing
+
+
+def test_chunk_flag_without_check_images_prints_ignored_note(cwd, capsys):
+    finish_novel(cwd)
+    capsys.readouterr()
+    assert im("--chunk", "1", client=FakeClient([])) == 0  # style not locked -- the note prints regardless
+    assert "Note: --chunk ignored; it only applies to --check-images." in capsys.readouterr().out
+
+
+def test_check_images_ignored_before_lock(cwd, capsys):
+    finish_novel(cwd)
+    capsys.readouterr()
+    client = FakeClient([])
+    assert im("--check-images", client=client) == 0
+    assert client.calls == []
+    assert "Note: --check-images ignored; the style isn't locked yet." in capsys.readouterr().out
+
+
+def test_five_way_mutual_exclusion_includes_check_images(cwd):
+    finish_novel(cwd)
+    client = FakeClient([])
+    assert im("--check-images", "--accept-bible", client=client) == 1
+    assert client.calls == []
+    assert im("--check-images", "--regenerate", "#Kael: reason", client=client) == 1
+    assert client.calls == []
 
 
 def test_loop_termination_guard_fails_cleanly_on_stage2_no_progress(cwd, monkeypatch, capsys):

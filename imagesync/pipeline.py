@@ -21,7 +21,7 @@ from imagesync.beats import (REVISE_RE, Beat, ParseError, cadence_warnings, extr
                              validate_fresh_beats, validate_revision)
 from imagesync.bible import TYPE_TO_CATEGORY, _norm
 from imagesync.compose import (build_manifest_rows, check_refs, check_shot_cadence, check_wide_under_9_16,
-                               compose_prompt, validate_stage2)
+                               compose_prompt, expected_filenames, validate_stage2)
 from plotpilot import config as pp_config
 from plotpilot.ingest import estimate_tokens
 from plotpilot.llm import LLMError, log_error
@@ -206,22 +206,33 @@ def run_stage0(conn, llm, spec, src, novel_id, chunk_row, chunk, *, gen_model, s
     return 0
 
 
-def run_revise(conn, llm, spec, src, novel_id, chunk_row, chunk, revise_arg: str, description: str, *,
-              gen_model, slug) -> int:
+def _resolve_revise_target(conn, chunk_row, chunk, revise_arg: str):
+    """(target, None) on success, (None, error_message) otherwise. Pulled out of run_revise so
+    run_revise_beat can resolve the same target identity without duplicating the parsing/occurrence-
+    counting logic."""
     m = REVISE_RE.match(revise_arg)
     if not m:
-        return _fail(f"--revise-beat: {revise_arg!r} doesn't look like a timecode (04-15, 04-15_2, 04-15a).")
+        return None, f"--revise-beat: {revise_arg!r} doesn't look like a timecode (04-15, 04-15_2, 04-15a)."
     base, occurrence, suffix = m[1], int(m[2] or 1), m[3] or ""
     occurrences = [i for i, (tc, _) in enumerate(chunk.scenes) if tc == base]
     if occurrence > len(occurrences):
-        return _fail(f"--revise-beat: chunk {chunk.idx} has no occurrence {occurrence} of {base}.")
+        return None, f"--revise-beat: chunk {chunk.idx} has no occurrence {occurrence} of {base}."
     scene_index = occurrences[occurrence - 1]
     beats = current_beats(conn, chunk_row, chunk)
     if beats is None:
-        return _fail(f"--revise-beat: chunk {chunk.idx} has no beats yet; run Stage 0 first.")
+        return None, f"--revise-beat: chunk {chunk.idx} has no beats yet; run Stage 0 first."
     target = next((b for b in beats if (b.scene_index, b.suffix) == (scene_index, suffix)), None)
     if target is None:
-        return _fail(f"--revise-beat: no beat {revise_arg!r} in chunk {chunk.idx}.")
+        return None, f"--revise-beat: no beat {revise_arg!r} in chunk {chunk.idx}."
+    return target, None
+
+
+def run_revise(conn, llm, spec, src, novel_id, chunk_row, chunk, revise_arg: str, description: str, *,
+              gen_model, slug) -> int:
+    target, err = _resolve_revise_target(conn, chunk_row, chunk, revise_arg)
+    if err:
+        return _fail(err)
+    beats = current_beats(conn, chunk_row, chunk)
     entry, has_continuity, previous_last_ref = _context_for(conn, novel_id, src, chunk)
     is_first_beat = (target.scene_index, target.suffix) == (beats[0].scene_index, beats[0].suffix)
     stage0_text = fill(spec.stages["STAGE 0"].text,
@@ -348,7 +359,8 @@ def _write_bible_file(spec, merged_bible, slug, title) -> Path:
     return path
 
 
-def run_stage1(conn, llm, spec, src, novel_id, chunk_row, chunk, *, stage1_model, slug) -> int:
+def run_stage1(conn, llm, spec, src, novel_id, chunk_row, chunk, *, stage1_model, slug,
+              post_batch_revision: tuple[int, str] | None = None) -> int:
     current = _current_bible(conn, novel_id)
     pass_row = _pending_refs_pass(conn, chunk_row["id"])
     if pass_row is None:
@@ -365,10 +377,15 @@ def run_stage1(conn, llm, spec, src, novel_id, chunk_row, chunk, *, stage1_model
             bible.check_no_collision(d, current)
             return d
 
+        def _note_from(d):
+            note = {"delta": d, "replace_tags": []}
+            if post_batch_revision is not None:
+                note["revise_beat"] = {"scene_index": post_batch_revision[0], "suffix": post_batch_revision[1]}
+            return json.dumps(note)
+
         try:
             attempt(llm, conn, novel_id, chunk_row["id"], "refs", stage1_model, user, _parse,
-                   max_tokens=config.STAGE1_MAX_TOKENS, slug=slug, chunk_idx=chunk.idx,
-                   note_from=lambda d: json.dumps({"delta": d, "replace_tags": []}))
+                   max_tokens=config.STAGE1_MAX_TOKENS, slug=slug, chunk_idx=chunk.idx, note_from=_note_from)
         except ParseError as e:
             return _fail(f"Chunk {chunk.idx}'s Stage 1 output was {e}; raw outputs are stored. "
                         "Re-run to try again.")
@@ -384,15 +401,20 @@ def run_stage1(conn, llm, spec, src, novel_id, chunk_row, chunk, *, stage1_model
         return 0
     _write_refs_txt(spec, current, chunk, delta, slug)
     bound = _write_pending(conn, slug, chunk.idx, pass_row["id"], delta)
-    if chunk_row["status"] == "beats":
-        db.set_chunk_status(conn, chunk_row["id"], "refs_pending")
+    # R1-3 fix: unconditional -- this line only ever runs inside the "new references found, must gate"
+    # branch, where setting refs_pending is always correct regardless of the chunk's PRIOR status. The
+    # pre-IS-5 `if chunk_row["status"] == "beats"` guard only ever fired from a fresh chunk's own natural
+    # path; a post-batch revision reopening Stage 1 can start from refs_approved or bible_pending instead,
+    # and the old guard would silently skip gating those.
+    db.set_chunk_status(conn, chunk_row["id"], "refs_pending")
     print(f"Chunk {chunk.idx}: {len(delta['new_references'])} new reference(s) pending. "
          f"Generate images from {Path(config.IMAGES_DIR) / slug / f'chunk-{chunk.idx:02d}' / 'refs.txt'}, "
          f"review {bound}, then re-run with --approve-refs.")
     return 0
 
 
-def approve_refs(conn, novel_id, chunk_row, *, spec, slug, title) -> int:
+def approve_refs(conn, novel_id, chunk_row, *, spec, slug, title, llm=None, src=None, chunk=None,
+                 gen_model=None) -> int:
     if chunk_row["status"] != "refs_pending":
         return _fail(f"--approve-refs: chunk {chunk_row['idx']} isn't at refs_pending.")
     pass_row = db.latest_pass(conn, chunk_row["id"], "refs")
@@ -403,7 +425,8 @@ def approve_refs(conn, novel_id, chunk_row, *, spec, slug, title) -> int:
         delta = bible.validate_stage1(json.loads(bound.read_text(encoding="utf-8-sig")))
     except (ValueError, ParseError) as e:
         return _fail(f"Pending file {bound} is invalid: {e}")
-    replace_tags = frozenset(json.loads(pass_row["note"])["replace_tags"])
+    note = json.loads(pass_row["note"])
+    replace_tags = frozenset(note["replace_tags"])
     current = _current_bible(conn, novel_id)
     try:
         merged = bible.merge(current, delta, chunk_row["idx"], replace_tags=replace_tags)
@@ -418,7 +441,28 @@ def approve_refs(conn, novel_id, chunk_row, *, spec, slug, title) -> int:
     bound.unlink()
     _write_bible_file(spec, merged, slug, title)
     print(f"Chunk {chunk_row['idx']}'s references approved and merged into the Visual Bible.")
-    return 0
+    revise_beat = note.get("revise_beat")
+    if revise_beat is None:
+        return 0
+    assert llm is not None and src is not None and chunk is not None and gen_model is not None, (
+        "approve_refs: a revise_beat-marked pass needs llm/src/chunk/gen_model threaded through -- this "
+        "is a programming error, not an operator-recoverable state.")
+    scene_index, suffix = revise_beat["scene_index"], revise_beat["suffix"]
+    row = db.chunks(conn, novel_id)[chunk_row["idx"] - 1]
+    beats = current_beats(conn, row, chunk)
+    beat_index = next(i for i, b in enumerate(beats) if (b.scene_index, b.suffix) == (scene_index, suffix))
+    batch_note = _batch_containing(conn, chunk_row["id"], beat_index)
+    try:
+        code = run_revise_batch(conn, llm, spec, src, novel_id, row, chunk, batch_note, gen_model=gen_model,
+                                slug=slug)
+    except (LLMError, anthropic.AnthropicError):
+        print(f"Batch {batch_note['batch_index']} re-emission failed; re-run your --revise-beat "
+             f"command for the beat at scene index {scene_index}{suffix} to retry.")
+        raise
+    if code != 0:
+        print(f"Batch {batch_note['batch_index']} re-emission failed; re-run your --revise-beat "
+             f"command for the beat at scene index {scene_index}{suffix} to retry.")
+    return code
 
 
 def _resolve_regenerate_target(tag, current_bible, old_delta):
@@ -539,12 +583,15 @@ def run_regenerate(conn, llm, spec, src, novel_id, chunk_row, chunk, tag_reason:
 # ---- Stage 2 (image prompts), the manifest, and the end-of-chunk continuity gate (IS-4) ----
 
 def _batch_progress(conn, chunk_id) -> tuple[int, int, list[str]]:
-    """(next_start, next_batch_index, previous_tail) from the latest ok stage2 pass's own note -- never
-    recomputed from config.BATCH_SIZE, so a later config edit can't reshuffle a batch already stored."""
-    p = db.latest_pass(conn, chunk_id, "stage2")
-    if p is None:
+    """(next_start, next_batch_index, previous_tail) from the ok stage2 pass with the HIGHEST batch_index
+    -- never the newest-inserted pass, and never recomputed from config.BATCH_SIZE. IS-5's own re-emission
+    mechanism is the first thing that can insert a stage2 pass out of batch_index order (redoing an
+    earlier batch after later ones already exist); selecting by insertion order would then silently
+    rewind the chunk's own reported progress (R1-2)."""
+    by_batch = _ok_stage2_by_batch(conn, chunk_id)
+    if not by_batch:
         return 0, 1, []
-    note = json.loads(p["note"])
+    note, _ = by_batch[max(by_batch)]
     return note["start"] + note["count"], note["batch_index"] + 1, note["tail"]
 
 
@@ -566,10 +613,10 @@ def _stage2_continues_seed(conn, novel_id, chunk) -> tuple[str | None, list[str]
     if not beats or beats[0].continues is None:
         return None, []
     prev_row = rows[chunk.idx - 2]
-    p = db.latest_pass(conn, prev_row["id"], "stage2")
-    if p is None:
+    by_batch = _ok_stage2_by_batch(conn, prev_row["id"])
+    if not by_batch:
         return None, []
-    note = json.loads(p["note"])
+    note, _ = by_batch[max(by_batch)]
     if not note["tail"]:
         return None, []
     shot_type = note["tail"][-1]
@@ -589,6 +636,89 @@ def _bible_entries_for_beats(current_bible, beats) -> str:
         if matched:
             lines.extend(bible._entries(matched, slotted=slotted))
     return "\n".join(lines) if lines else "(no matching references)"
+
+
+def _batch_containing(conn, chunk_id, beat_index: int):
+    """The stored ok stage2 pass's note whose (start, start+count) range covers beat_index (the target
+    beat's position in current_beats()'s flat list), or None if that beat hasn't been batched yet."""
+    for note, _ in _ok_stage2_by_batch(conn, chunk_id).values():
+        if note["start"] <= beat_index < note["start"] + note["count"]:
+            return note
+    return None
+
+
+def run_revise_batch(conn, llm, spec, src, novel_id, chunk_row, chunk, batch_note: dict, *, gen_model,
+                    slug) -> int:
+    """Re-emits one already-stored batch (named by `batch_note`, from _batch_containing) after a
+    post-batch revision. The new pass shares batch_note's own batch_index, so IS-4's own latest-pass-
+    per-batch_index dedup (_write_all_batch_files, _rewrite_manifest) transparently makes it
+    authoritative for that one batch file and those manifest rows -- no changes needed to either
+    self-heal helper. Also rewrites manifest.csv itself: a re-emitted batch's own manifest rows must
+    reflect the change immediately, and run_bible_update (the normal trigger for a manifest refresh) may
+    not run again for a long time if the chunk was already past that point when the revision happened."""
+    beats = current_beats(conn, chunk_row, chunk)
+    batch = beats[batch_note["start"]:batch_note["start"] + batch_note["count"]]
+    continues_text, previous_beats_text, previous_tail = _batch_context(
+        conn, novel_id, spec, chunk_row, chunk, beats, batch_note["start"], batch_note["batch_index"])
+    code = _compose_and_store_batch(conn, llm, spec, src, novel_id, chunk_row, chunk, batch,
+                                    batch_note["start"], batch_note["batch_index"], continues_text,
+                                    previous_beats_text, previous_tail, gen_model=gen_model, slug=slug)
+    if code != 0:
+        return code
+    _rewrite_manifest(conn, novel_id, src, slug)
+    return 0
+
+
+def run_revise_beat(conn, llm, spec, src, novel_id, chunk_row, chunk, revise_arg: str, description: str, *,
+                   gen_model, stage1_model, slug) -> int:
+    """The --revise-beat CLI dispatch target: resolves the target beat, and, only if its batch is already
+    stored, reopens Stage 1 (which naturally returns an empty delta -- immediate re-emission, no gate --
+    or proposes a new element -- gate, then approve_refs's own auto-continue finishes the flow). A beat
+    Stage 2 hasn't yet reached behaves exactly as run_revise already does, unchanged."""
+    target, err = _resolve_revise_target(conn, chunk_row, chunk, revise_arg)
+    if err:
+        return _fail(err)
+    beats = current_beats(conn, chunk_row, chunk)
+    beat_index = next(i for i, b in enumerate(beats)
+                      if (b.scene_index, b.suffix) == (target.scene_index, target.suffix))
+    batch_note = _batch_containing(conn, chunk_row["id"], beat_index)
+    if batch_note is not None and chunk_row["status"] == "refs_pending":
+        return _fail(f"--revise-beat: chunk {chunk.idx} already has a pending reference approval; run "
+                    "--approve-refs first, then retry this --revise-beat.")
+    code = run_revise(conn, llm, spec, src, novel_id, chunk_row, chunk, revise_arg, description,
+                      gen_model=gen_model, slug=slug)
+    if code != 0:
+        return code
+    if batch_note is None:
+        return 0
+    was_bible_pending = chunk_row["status"] == "bible_pending"
+    code = run_stage1(conn, llm, spec, src, novel_id, chunk_row, chunk, stage1_model=stage1_model, slug=slug,
+                      post_batch_revision=(target.scene_index, target.suffix))
+    if code != 0:
+        return code
+    row = db.chunks(conn, novel_id)[chunk_row["idx"] - 1]
+    if row["status"] == "refs_pending":
+        if was_bible_pending:
+            _clear_stale_continuity_pending(conn, chunk_row, slug)
+        return 0   # the gate; run_stage1 already printed it -- approve_refs's auto-continue finishes it
+    if was_bible_pending:
+        _clear_stale_continuity_pending(conn, chunk_row, slug)
+    try:
+        code = run_revise_batch(conn, llm, spec, src, novel_id, chunk_row, chunk, batch_note,
+                                gen_model=gen_model, slug=slug)
+    except (LLMError, anthropic.AnthropicError):
+        # attempt() re-raises on a genuine API failure -- this must still print the recovery message
+        # before the exception propagates to cli.py's own outer handler, not only on a returned non-zero
+        # code (R2-1). revise_arg is the exact operator-typed argument, already disambiguated -- it is
+        # printed verbatim, never reconstructed from target.timecode + target.suffix, which is not always
+        # a valid --revise-beat argument when the beat's own base timecode is duplicated.
+        print(f"Batch {batch_note['batch_index']} re-emission failed; re-run --revise-beat "
+             f"{revise_arg} \"<description>\" to retry.")
+        raise
+    if code != 0:
+        print(f"Batch {batch_note['batch_index']} re-emission failed; re-run --revise-beat "
+             f"{revise_arg} \"<description>\" to retry.")
+    return code
 
 
 def _ok_stage2_by_batch(conn, chunk_id) -> dict:
@@ -629,6 +759,21 @@ def _write_continuity_pending_if_missing(conn, chunk_row, slug) -> Path:
     return bound
 
 
+def _clear_stale_continuity_pending(conn, chunk_row, slug) -> None:
+    """If the chunk currently has a continuity pending file (bound to the latest ok continuity pass),
+    delete it with the same 'superseded' notice _write_pending prints elsewhere -- a post-batch revision
+    that regresses a chunk away from bible_pending means the old continuity delta no longer reflects the
+    (now stale) batch set it was derived from."""
+    p = db.latest_pass(conn, chunk_row["id"], "continuity")
+    if p is None:
+        return
+    bound = _continuity_pending_path(slug, chunk_row["idx"], p["id"])
+    if bound.exists():
+        bound.unlink()
+        print(f"Note: {bound}'s continuity update is superseded by this revision; a fresh one will be "
+             "derived once Stage 2 is complete again.")
+
+
 def _rewrite_manifest(conn, novel_id, src, slug) -> None:
     """manifest.csv for the WHOLE novel, in chunk order, one row per stored batch -- always from the
     stored beats' own display timecodes, never the model's own timecode field."""
@@ -652,23 +797,32 @@ def _rewrite_manifest(conn, novel_id, src, slug) -> None:
         w.writerows(all_rows)
 
 
-def run_stage2(conn, llm, spec, src, novel_id, chunk_row, chunk, *, gen_model, slug) -> int:
-    current = _current_bible(conn, novel_id)
-    beats = current_beats(conn, chunk_row, chunk)
-    start, batch_index, previous_tail = _batch_progress(conn, chunk_row["id"])
-    if start >= len(beats):
-        return 0
-    batch = beats[start:start + config.BATCH_SIZE]
-    aspect = current["style_lock"]["aspect"]
-
-    continues_text, previous_beats_text = None, None
-    if start == 0:
+def _batch_context(conn, novel_id, spec, chunk_row, chunk, beats, start, batch_index):
+    """(continues_text, previous_beats_text, previous_tail) for the batch starting at beat index `start`.
+    For batch_index == 1: previous_tail is the CONTINUES seed (chunk 2+) or empty (chunk 1) -- the only
+    tail data a chunk's own first batch has, since it has no earlier batch of its own. For batch_index >
+    1: previous_beats_text is the previous 3 beats (labeled per spec.stage2_context_label), and
+    previous_tail is looked up EXPLICITLY from the batch at batch_index - 1's own stored note["tail"] --
+    never a live `_batch_progress` read, so this stays correct even after a re-emission stores a stage2
+    pass out of batch_index order (R1-2)."""
+    if batch_index == 1:
         continues_text, seed_tail = _stage2_continues_seed(conn, novel_id, chunk)
-        previous_tail = seed_tail or previous_tail
-    else:
-        prev_slice = beats[max(0, start - 3):start]
-        previous_beats_text = spec.stage2_context_label + "\n" + _beats_block(prev_slice)
+        return continues_text, None, seed_tail
+    prev_slice = beats[max(0, start - 3):start]
+    previous_beats_text = spec.stage2_context_label + "\n" + _beats_block(prev_slice)
+    by_batch = _ok_stage2_by_batch(conn, chunk_row["id"])
+    prev_note, _ = by_batch[batch_index - 1]
+    return None, previous_beats_text, prev_note["tail"]
 
+
+def _compose_and_store_batch(conn, llm, spec, src, novel_id, chunk_row, chunk, batch, start, batch_index,
+                             continues_text, previous_beats_text, previous_tail, *, gen_model, slug) -> int:
+    """Composes, sends, QA-retries, and stores one Stage 2 batch. Re-derives `current`/`aspect` fresh
+    from chunk_row/novel_id, since both run_stage2 and run_revise_batch need them fresh anyway. Byte-
+    identical logic to the pre-IS-5 run_stage2 body, just parameterized instead of reading
+    _batch_progress's "next" values directly."""
+    current = _current_bible(conn, novel_id)
+    aspect = current["style_lock"]["aspect"]
     stage2_prompt = "\n\n".join([spec.stages["STAGE 2"].text, spec.contracts.override, spec.contracts.stage2])
     sections = [spec.mode_a_line]
     if continues_text:
@@ -735,6 +889,19 @@ def run_stage2(conn, llm, spec, src, novel_id, chunk_row, chunk, *, gen_model, s
     return 0
 
 
+def run_stage2(conn, llm, spec, src, novel_id, chunk_row, chunk, *, gen_model, slug) -> int:
+    beats = current_beats(conn, chunk_row, chunk)
+    start, batch_index, _ = _batch_progress(conn, chunk_row["id"])
+    if start >= len(beats):
+        return 0
+    batch = beats[start:start + config.BATCH_SIZE]
+    continues_text, previous_beats_text, previous_tail = _batch_context(
+        conn, novel_id, spec, chunk_row, chunk, beats, start, batch_index)
+    return _compose_and_store_batch(conn, llm, spec, src, novel_id, chunk_row, chunk, batch, start,
+                                    batch_index, continues_text, previous_beats_text, previous_tail,
+                                    gen_model=gen_model, slug=slug)
+
+
 def run_bible_update(conn, llm, spec, src, novel_id, chunk_row, chunk, *, bible_model, slug) -> int:
     current = _current_bible(conn, novel_id)
     beats = current_beats(conn, chunk_row, chunk)
@@ -797,4 +964,49 @@ def accept_bible(conn, novel_id, chunk_row, chunk, *, spec, slug, title) -> int:
     with open(Path(config.LOG_DIR) / "bible-accepts.log", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now(timezone.utc).isoformat()} chunk {chunk.idx} accepted (pass {pass_row['id']})\n")
     print(f"Chunk {chunk.idx}'s continuity update accepted; chunk done.")
+    return 0
+
+
+def check_images(conn, novel_id, src, *, slug, images_dir: Path, chunk_filter: int | None = None) -> int:
+    """Prints, per done chunk (all of them, or just chunk_filter), every expected filename missing from
+    images_dir/slug/chunk-NN/, and every .png file present there that isn't expected -- built directly
+    from the database, via the same current_beats/_ok_stage2_by_batch/build_manifest_rows path
+    _rewrite_manifest already uses, never from the on-disk manifest.csv, so a hand-edited or deleted copy
+    can't silently change what's reported. Never blocks or gates -- always returns 0."""
+    pairs = list(zip(db.chunks(conn, novel_id), src.chunks))
+    if chunk_filter is not None:
+        match = next(((row, chunk) for row, chunk in pairs if chunk.idx == chunk_filter), None)
+        if match is None:
+            print(f"No chunk {chunk_filter} in this novel.")
+            return 0
+        if match[0]["status"] != "done":
+            print(f"Chunk {chunk_filter} isn't done yet; nothing to check.")
+            return 0
+        pairs = [match]
+    else:
+        pairs = [(row, chunk) for row, chunk in pairs if row["status"] == "done"]
+
+    any_findings = False
+    for row, chunk in pairs:
+        beats = current_beats(conn, row, chunk)
+        by_batch = _ok_stage2_by_batch(conn, row["id"])
+        entries = []
+        for batch_index in sorted(by_batch):
+            note, _ = by_batch[batch_index]
+            batch_beats = beats[note["start"]:note["start"] + note["count"]]
+            entries.extend((b.timecode + b.suffix, item) for b, item in zip(batch_beats, note["items"]))
+        expected = expected_filenames(build_manifest_rows(entries))
+        chunk_dir = images_dir / slug / f"chunk-{chunk.idx:02d}"
+        present = {p.name for p in chunk_dir.glob("*.png")} if chunk_dir.is_dir() else set()
+        missing = [f for f in expected if f not in present]
+        extra = sorted(present - set(expected))
+        if missing or extra:
+            any_findings = True
+            print(f"Chunk {chunk.idx}:")
+            for f in missing:
+                print(f"  missing: {f}")
+            for f in extra:
+                print(f"  extra: {f}")
+    if not any_findings:
+        print("No missing or extra images.")
     return 0
