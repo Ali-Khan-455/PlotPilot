@@ -79,3 +79,41 @@ def check_no_collision(delta: dict, current_bible: dict) -> None:
     for r in delta["new_references"]:
         if _norm(r["tag"]) in existing:
             raise ParseError(f"tag {r['tag']!r} already exists in the Visual Bible")
+
+
+def merge(bible: dict, delta: dict, chunk_idx: int, *, replace_tags: frozenset[str] = frozenset()) -> dict:
+    """Deterministic merge, in `new_references` array order (slots are assigned from that order, per
+    the spec's own note). A tag in `replace_tags` replaces the matching-category existing row in place,
+    keeping its `slot`/`first_appeared_chunk`; every other tag appends as new, defensively re-raising
+    on an unexpected collision (a stale or edited pending file). Never mutates an existing row's `slot`
+    or `first_appeared_chunk`, never removes a row."""
+    b = copy.deepcopy(bible)
+    replace_norm = {_norm(t) for t in replace_tags}
+    for r in delta["new_references"]:
+        category = TYPE_TO_CATEGORY[r["type"]]
+        item = next(i for i in delta["bible_update"][category] if _norm(i["tag"]) == _norm(r["tag"]))
+        norm_tag = _norm(r["tag"])
+        if norm_tag in replace_norm:
+            existing = next((row for row in b[category] if _norm(row["tag"]) == norm_tag), None)
+            if existing is None:
+                raise ParseError(f"replace_tags target {r['tag']!r} not found in {category!r}")
+            existing["name"] = item["name"]
+            existing["descriptor"] = item["descriptor"]
+            existing["current_state"] = item["current_state"]
+            continue
+        all_tags = {_norm(row["tag"]) for cat in ("characters", "locations", "objects") for row in b[cat]}
+        if norm_tag in all_tags:
+            raise ParseError(f"tag {r['tag']!r} already exists in the Visual Bible")
+        new_row = {"name": item["name"], "tag": r["tag"], "descriptor": item["descriptor"],
+                  "current_state": item["current_state"], "reference_generated": True,
+                  "first_appeared_chunk": chunk_idx}
+        if category in SLOTTED_CATEGORIES:
+            slots = b["slots"][category]
+            cap = SLOT_CAPS[category]
+            if len(slots) < cap:
+                new_row["slot"] = len(slots) + 1
+                slots.append(r["tag"])
+            else:
+                new_row["slot"] = "fallback"
+        b[category].append(new_row)
+    return b
