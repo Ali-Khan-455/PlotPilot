@@ -62,3 +62,38 @@ def test_one_style_lock_per_novel_and_unique_source_pass(conn):
     with pytest.raises(sqlite3.IntegrityError):  # replaying the same accept
         db.add_bible_version(conn, nid, 1, "refs", "{}", "{}", source_pass_id=pid)
     assert len(rows(conn, "passes")) == 3 and len(rows(conn, "bible_versions")) == 3
+
+
+def test_chunks_latest_pass_and_ok_passes(conn):
+    nid = novel(conn)
+    cid1, cid2 = (conn.execute("SELECT id FROM chunks WHERE idx=?", (i,)).fetchone()[0] for i in (1, 2))
+    rows_ = db.chunks(conn, nid)
+    assert [(r["idx"], r["status"]) for r in rows_] == [(1, "ready"), (2, "ready")]
+    assert db.latest_pass(conn, cid1, "beats") is None
+    p1 = db.add_pass(conn, nid, cid1, "beats", "m", "", "{}", note='{"a":1}', new_status="beats")
+    p2 = db.add_pass(conn, nid, cid1, "beats", "m", "", "{}v2", note='{"a":2}')
+    latest = db.latest_pass(conn, cid1, "beats")
+    assert latest["id"] == p2 and latest["output_text"] == "{}v2" and latest["note"] == '{"a":2}'
+    assert db.latest_pass(conn, cid1, "beats", after_id=p2) is None
+    r1 = db.add_pass(conn, nid, cid1, "beat_revision", "m", "", "{}r", note='{"b":1}')
+    ok = db.ok_passes(conn, cid1, ["beats", "beat_revision"])
+    assert [o["id"] for o in ok] == [p1, p2, r1]
+    assert ok[-1]["note"] == '{"b":1}'
+    assert [o["id"] for o in db.ok_passes(conn, cid1, ["beat_revision"], after_id=p2)] == [r1]
+    assert db.ok_passes(conn, cid2, ["beats"]) == []
+
+
+def test_set_chunk_status(conn):
+    novel(conn)
+    cid1 = conn.execute("SELECT id FROM chunks WHERE idx=1").fetchone()[0]
+    db.set_chunk_status(conn, cid1, "refs_pending")
+    assert conn.execute("SELECT status FROM chunks WHERE id=?", (cid1,)).fetchone()[0] == "refs_pending"
+
+
+def test_pass_is_bound(conn):
+    nid = novel(conn)
+    cid1 = conn.execute("SELECT id FROM chunks WHERE idx=1").fetchone()[0]
+    pid = db.add_pass(conn, nid, cid1, "refs", "m", "", "{}")
+    assert db.pass_is_bound(conn, pid) is False
+    db.add_bible_version(conn, nid, 1, "refs", "{}", "{}", source_pass_id=pid)
+    assert db.pass_is_bound(conn, pid) is True

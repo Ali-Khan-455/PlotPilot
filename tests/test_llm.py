@@ -75,6 +75,12 @@ def test_count_tokens_passes_system_and_messages(tmp_path):
     assert client.counted == [{"model": "m", "system": "s", "messages": [{"role": "user", "content": "u"}]}]
 
 
+def test_count_tokens_omits_system_when_none(tmp_path):
+    client = FakeClient(token_count=7)
+    assert LLM(client, tmp_path).count_tokens("m", "u", None) == 7
+    assert "system" not in client.counted[-1]
+
+
 def test_count_tokens_auth_error(tmp_path):
     client = FakeClient()
     auth = TypeError("Could not resolve authentication method")

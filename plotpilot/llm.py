@@ -83,9 +83,11 @@ class LLM:
         return limit
 
     def count_tokens(self, model, user, system) -> int:
+        kwargs = dict(model=model, messages=[{"role": "user", "content": user}])
+        if system is not None:
+            kwargs["system"] = system
         try:
-            return self.client.messages.count_tokens(
-                model=model, system=system, messages=[{"role": "user", "content": user}]).input_tokens
+            return self.client.messages.count_tokens(**kwargs).input_tokens
         except TypeError as e:
             if _is_auth_error(e):
                 raise LLMError(CREDENTIALS_MSG) from None

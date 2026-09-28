@@ -1,6 +1,6 @@
 # Image-Sync Engine — plan
 
-**Status:** IS-1 (foundation) built; see `docs/image-sync-audit.md`. IS-2 is blocked on C4.
+**Status:** IS-1 (foundation) built and merged; see `docs/image-sync-audit.md`. C4 is resolved. IS-2 is unblocked.
 
 ## Context
 
@@ -336,7 +336,7 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
   - `--revise-beat` takes `04-15_2` to name the second occurrence.
   - Later, sub-second or per-scene offsets in PlotPilot could remove the collision at its source. That is out of scope now.
 
-## Conflicts (C1–C3 confirmed by you; C4 open, blocks IS-2 only)
+## Conflicts (C1–C4, all confirmed by you)
 
 - **C1 — Contract fields versus the "code enforces" design (Q1).** As literally specified, three contract fields would move work from code to the model. The proposal keeps each field but gives code the final say, like PlotPilot's tracker merge forcing a term's `chunk`.
   - **Stage 2 `prompt`:** the model returns the scene composition only. Code appends the `@Name` references and the locked suffix loaded from the spec. If the model wrote the whole prompt, the suffix would no longer be guaranteed word for word, which is v3's hardest rule.
@@ -364,17 +364,15 @@ docs/image-sync-audit.md     imagesync decisions and rulings (IS-D1…)
 - **C3:** the mapping is A → (c), B → (b), C → (a), D → (d).
 - **Spec:** `prompts/image-sync-v3.md` is committed verbatim (4a39d1b), with the Q9 filename rule already in HOW TO USE step 5. The TOOL OUTPUT CONTRACTS appendix is appended (9964b56).
 
-**C4 — How the model learns the JSON shape (open; blocks IS-2, not IS-1).**
-- The appendix says the contracts "are not part of the prompt the model sees".
-- The v3 stage prompts tell the model to answer in markdown blocks: `#M-SS` / `Narration:` blocks, reference prompts in a fence, and Stage 2 prompts with the suffix appended.
-- If the model sees only the v3 text, it answers in that markdown, never in the JSON the code validates.
-
-**Proposed resolution:**
-- Amend the appendix so that its per-stage contract block **is** sent after that stage's prompt text, loaded by heading, with one fixed instruction line that also lives in the appendix.
-- The line would read: "Return only one JSON object matching the contract below. It replaces the output format described above; all other rules above still apply."
-- The v3 prompt text itself stays unchanged.
-
-**The alternative:** parse v3's markdown formats in code, which is fragile, and the Stage 2 prompts would still carry a model-written suffix, which C1 rules out.
+**C4 — How the model learns the JSON shape. Confirmed.**
+- The appendix used to say the contracts "are not part of the prompt the model sees". That's no longer true: IS-2 appends each stage's contract to that stage's user message.
+- **Resolution (with two refinements over the original proposal):**
+  - Each stage's user message is: that stage's v3 prompt text (unchanged), then the fixed override paragraph now in the appendix under "### How the model uses these contracts", then that stage's JSON contract block.
+  - **Refinement 1:** the override paragraph explicitly says to ignore the markdown format described above, not just to "output JSON" — so the model doesn't emit both.
+  - **Refinement 2:** it explicitly says fields not in the schema are ignored and must not be included — so the model doesn't re-add `cadence_warning`, `slot`, or `manifest_rows`, which C1 already has code recompute.
+  - The v3 prompt text itself is unchanged. The appendix's own wording is the only edit (applied directly to `prompts/image-sync-v3.md`, since it's spec content).
+- **Known risk, not yet mitigated:** the model sees two format instructions in one message (the v3 prompt's markdown format, then the override to JSON). An override instruction usually wins, but a model can still produce both. If IS-2's first real runs show mixed markdown-plus-JSON output, the fallback is a per-stage "format-strip": send the v3 prompt with its own `Output format:` section removed programmatically at call time (not edited in the spec file) and replaced by the override plus the contract. This is recorded in `docs/image-sync-audit.md` and deferred until real runs show it's needed.
+- **Alternatives rejected:** parsing v3's markdown output in code (defeats the point of having a schema, and is fragile); rewriting v3's prompt text to natively ask for JSON (breaks "each system's spec is a versioned, verbatim artifact").
 
 ## Open questions (answered — kept for reference)
 

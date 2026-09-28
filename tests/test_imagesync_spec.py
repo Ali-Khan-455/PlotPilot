@@ -15,7 +15,16 @@ def test_real_spec_loads():
     assert spec.sub_styles["c"].startswith("Fantasy adventure manhwa — vivid palette")
     assert set(spec.colors) == set(config.MODULE_TO_COLOR.values())
     assert spec.colors["Romance/drama"] == "soft, warm, slightly desaturated pastels"
-    assert '"continuity_log_entries"' in spec.contracts
+    assert "Ignore the markdown format described above" in spec.contracts.override
+    assert '"timecode": "04-15"' in spec.contracts.stage0 and '"new_references"' in spec.contracts.stage1
+    assert '"prompts"' in spec.contracts.stage2
+    assert '"continuity_log_entries"' in spec.contracts.bible_update
+    assert spec.mode_a_line == "INPUT MODE: PLOTPILOT"
+    assert spec.continuity_log_header == "CONTINUITY LOG (append-only)"
+    assert spec.regenerate_line == "regenerate #Name: [reason]"
+    assert "Continuity Log" in spec.continuity_prompt and "Never invent a state change" in spec.continuity_prompt
+    assert spec.stage2_context_label == "PREVIOUS BATCH (context only, no prompt needed)"
+    assert '"A" | "B" | "C" | "D" | null' in spec.contracts.stage2
 
 
 def _damaged(tmp_path, old, new):
@@ -31,6 +40,13 @@ def _damaged(tmp_path, old, new):
     ("- **(d) Comedy slice-of-life**", "- Comedy slice-of-life", "sub-style"),
     ("- Comedy/slice of life: bright", "- Comedy and slice of life: bright", "Comedy/slice of life"),
     ("## TOOL OUTPUT CONTRACTS (appendix)", "## CONTRACTS", "TOOL OUTPUT CONTRACTS"),
+    ("### How the model uses these contracts", "### How the model uses contracts", "How the model uses"),
+    ("**Stage 1 output:**", "**Stage One output:**", "Stage 1 output"),
+    ("```\nINPUT MODE: PLOTPILOT", "INPUT MODE: PLOTPILOT", "Mode A"),
+    ("CONTINUITY LOG (append-only)", "CONTINUITY LOG (appends only)", "CONTINUITY LOG"),
+    ('"regenerate #Name: [reason]"', '"regenerate #Tag: [reason]"', "regenerate"),
+    ("## BIBLE UPDATE (end-of-Stage-2 continuity call)", "## BIBLE UPDATE", "BIBLE UPDATE"),
+    ("PREVIOUS BATCH (context only, no prompt needed)", "PREVIOUS BATCH (context only)", "PREVIOUS BATCH"),
 ])
 def test_structure_changes_fail_closed(tmp_path, old, new, what):
     with pytest.raises((SpecError, ValueError), match=what):
