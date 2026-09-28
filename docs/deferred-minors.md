@@ -2,6 +2,12 @@
 
 Minor findings from each phase's final code review. They were deliberately left out of that phase's fix pass: none of them corrupts output or loses data. Fix them whenever it's convenient, write a failing test first, and delete the entry once it's fixed.
 
+## Image-Sync IS-3 — Stage 1 (references) and the Visual Bible
+
+- [ ] **`_write_pending`'s pending-JSON write isn't atomic, and is skipped once the path exists even if that file is a partial/corrupt write from an earlier crash** (`imagesync/pipeline.py::_write_pending`). A process killed mid-write leaves a truncated file at a path that will never be rewritten (unlike `refs.txt`/`bibles/*.md`, which are unconditionally rebuilt every run); the operator's only recourse today is `--approve-refs` failing with "Pending file ... is invalid: ..." and manually deleting the file. Fix: write to a sibling temp path and `os.replace()` into place.
+- [ ] **`approve_refs`'s DB commit and its file cleanup aren't one atomic unit** (`imagesync/pipeline.py::approve_refs`). If the process crashes between `db.add_bible_version` succeeding and the following `bound.unlink()`/`_write_bible_file(...)`, the merge is durably committed (status `refs_approved`, Bible in the DB) but the old pending file is left on disk forever and `bibles/<slug>.md` stays stale until some later event happens to rewrite it. Doesn't corrupt anything `_pending_state`/`_pending_refs_pass` read (both are DB-only), so it's cosmetic, not a correctness bug.
+- [ ] **`--regenerate ""` (an explicitly empty string) is silently dropped instead of refused with a message** (`imagesync/cli.py`). `args.regenerate` is falsy for `""`, identical to the flag not being given at all — no "ignored; the style isn't locked yet" note (that branch only fires when not locked), no failure message, it just falls into the plain continuation loop. `run_regenerate`'s own "empty reason" refusal is never reached because the flag itself is empty, not just its reason.
+
 ## Image-Sync IS-2 — Stage 0 (beats)
 
 - [ ] **No test exercises `current_beats`'s length-mismatch guard** (`imagesync/pipeline.py::current_beats`). The `len(raw_items) == len(identity)` assertion (a corrupted `note`/`output_text` pair) has no test forcing a mismatch to confirm it raises `ParseError` rather than silently truncating via `zip`.

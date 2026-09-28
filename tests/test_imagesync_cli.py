@@ -505,6 +505,24 @@ def test_regenerate_pending_reference_hides_target_and_sends_reason(cwd):
     assert delta["new_references"][0]["descriptor"] == "new descriptor"
 
 
+def test_regenerate_matches_by_real_name_not_by_tag_string(cwd):
+    """A regenerate response may echo the target under a different tag than the real one, as long as
+    its bible_update name matches the target's real (spaced) name — the match must compare against
+    the target's actual name, not its tag string."""
+    finish_novel(cwd)
+    original = refs_reply([{"type": "character", "tag": "OldManChen", "descriptor": "d0"}],
+                          characters=[{"name": "Old Man Chen", "tag": "OldManChen", "descriptor": "d0"}])
+    lock_and_run_stage0(cwd, stage1_reply=original, beats_narration="Old Man Chen showed up.")
+    reworded = refs_reply([{"type": "character", "tag": "Chen", "descriptor": "regenerated"}],
+                          characters=[{"name": "Old Man Chen", "tag": "Chen", "descriptor": "regenerated"}])
+    client = FakeClient([reworded])
+    assert im("--regenerate", "#OldManChen: reason", client=client) == 0
+    [pending] = pending_files()
+    delta = json.loads(pending.read_text())
+    assert delta["new_references"][0]["tag"] == "OldManChen"  # code overwrote it back to the real tag
+    assert delta["new_references"][0]["descriptor"] == "regenerated"
+
+
 def test_regenerate_unresolvable_target_refused_with_no_call(cwd):
     finish_novel(cwd)
     lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))

@@ -427,16 +427,17 @@ def _resolve_regenerate_target(tag, current_bible, old_delta):
     return None
 
 
-def _match_regenerate_target(delta, target_type, target_tag):
+def _match_regenerate_target(delta, target_type, target_tag, target_name):
     """The one new_references entry (plus its bible_update counterpart) matching the regenerate target
-    by tag or name, with its tag/category overwritten to the target's real ones — code has the final
-    say. Returns a full one-entry delta (never a bare item), since validate_stage1's bijection means
-    the two must travel together. Raises ParseError on zero or more than one match."""
+    by tag or by its real NAME (not its tag string — the model may echo the target under a different
+    tag while still naming it correctly), with its tag/category overwritten to the target's real ones —
+    code has the final say. Returns a full one-entry delta (never a bare item), since validate_stage1's
+    bijection means the two must travel together. Raises ParseError on zero or more than one match."""
     matches = []
     for r in delta["new_references"]:
         category = TYPE_TO_CATEGORY[r["type"]]
         bu_item = next(i for i in delta["bible_update"][category] if _norm(i["tag"]) == _norm(r["tag"]))
-        if _norm(r["tag"]) == _norm(target_tag) or _norm(bu_item["name"]) == _norm(target_tag):
+        if _norm(r["tag"]) == _norm(target_tag) or _norm(bu_item["name"]) == _norm(target_name):
             matches.append((r, bu_item))
     if len(matches) != 1:
         raise ParseError(f"expected exactly one regenerate match, found {len(matches)}")
@@ -500,7 +501,7 @@ def run_regenerate(conn, llm, spec, src, novel_id, chunk_row, chunk, tag_reason:
 
     def _parse(text):
         d = bible.validate_stage1(extract_json(text))
-        return _match_regenerate_target(d, target_type, target_tag)
+        return _match_regenerate_target(d, target_type, target_tag, target_name)
 
     try:
         attempt(llm, conn, novel_id, chunk_row["id"], "refs", stage1_model, user, _parse,
