@@ -456,13 +456,21 @@ Note: `cadence_warning` is not a contract field. The tool computes cadence from 
     }
   ],
   "bible_update": {
-    "characters": [...],
-    "locations": [...],
-    "objects": [...]
+    "characters": [
+      {
+        "name": "string",
+        "tag": "string",
+        "descriptor": "string",
+        "current_state": "string"   // optional
+      }
+    ],
+    "locations": [...],   // same item shape
+    "objects": [...]      // same item shape
   }
 }
 ```
 Note: `slot` is not a contract field. The tool assigns slots from the `new_references` array order at chunk 1, then locks them.
+Note: when `current_state` is absent or empty, the tool defaults it per type: `"clean"` (character), `"intact"` (location), `"present"` (object).
 
 **Stage 2 batch output:**
 ```

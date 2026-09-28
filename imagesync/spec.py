@@ -16,6 +16,7 @@ INPUT_MODES = "INPUT MODES"
 VISUAL_BIBLE = "THE VISUAL BIBLE"
 MODE_A_MARKER = "**Mode A — PlotPilot (preferred):**"
 CONTINUITY_LOG_LINE = "CONTINUITY LOG (append-only)"
+REGENERATE_LINE = "regenerate #Name: [reason]"
 SUB_STYLE_RE = re.compile(r"^- \*\*\(([a-z])\) ([^*]+)\*\* — (.+)$")
 COLOR_RE = re.compile(r"^- ([^:]+): (.+)$")
 CONTRACT_MARKERS = ("**Stage 0 output:**", "**Stage 1 output:**", "**Stage 2 batch output:**",
@@ -45,6 +46,7 @@ class Spec:
     contracts: Contracts
     mode_a_line: str
     continuity_log_header: str
+    regenerate_line: str
 
 
 def _split_contracts(text: str) -> Contracts:
@@ -119,6 +121,12 @@ def _continuity_log_header(bible_section: str) -> str:
     return CONTINUITY_LOG_LINE
 
 
+def _regenerate_line(stage1_text: str) -> str:
+    if REGENERATE_LINE not in stage1_text:
+        raise SpecError(f"STAGE 1 has no {REGENERATE_LINE!r} line")
+    return REGENERATE_LINE
+
+
 def load_spec(path: Path = config.SPEC_PATH) -> Spec:
     """Checks that config.MODULE_TO_COLOR's labels exist in the spec. That guards IS-4's later lookup
     colors[MODULE_TO_COLOR[bible genre_color_default]] (the Bible stores the module letter); it does not
@@ -128,5 +136,6 @@ def load_spec(path: Path = config.SPEC_PATH) -> Spec:
     contracts = _split_contracts(load_section(path, CONTRACTS))
     mode_a_line = _first_fence_after(load_section(path, INPUT_MODES), MODE_A_MARKER)
     continuity_log_header = _continuity_log_header(load_section(path, VISUAL_BIBLE))
+    regenerate_line = _regenerate_line(stages["STAGE 1"].text)
     return Spec({k: stages[k] for k in STAGES}, _suffix(style), _sub_styles(style), _colors(style),
-                contracts, mode_a_line, continuity_log_header)
+                contracts, mode_a_line, continuity_log_header, regenerate_line)

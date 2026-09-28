@@ -21,6 +21,7 @@ def test_real_spec_loads():
     assert '"continuity_log_entries"' in spec.contracts.bible_update
     assert spec.mode_a_line == "INPUT MODE: PLOTPILOT"
     assert spec.continuity_log_header == "CONTINUITY LOG (append-only)"
+    assert spec.regenerate_line == "regenerate #Name: [reason]"
 
 
 def _damaged(tmp_path, old, new):
@@ -40,6 +41,7 @@ def _damaged(tmp_path, old, new):
     ("**Stage 1 output:**", "**Stage One output:**", "Stage 1 output"),
     ("```\nINPUT MODE: PLOTPILOT", "INPUT MODE: PLOTPILOT", "Mode A"),
     ("CONTINUITY LOG (append-only)", "CONTINUITY LOG (appends only)", "CONTINUITY LOG"),
+    ('"regenerate #Name: [reason]"', '"regenerate #Tag: [reason]"', "regenerate"),
 ])
 def test_structure_changes_fail_closed(tmp_path, old, new, what):
     with pytest.raises((SpecError, ValueError), match=what):
