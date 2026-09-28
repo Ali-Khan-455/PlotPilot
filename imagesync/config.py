@@ -20,3 +20,8 @@ MODULE_TO_COLOR = {"A": "Isekai/power fantasy", "B": "Romance/drama", "C": "Dark
 # Each beat restates its slice of the chunk's narration, so this needs to be draft-sized, not a smaller
 # custom constant.
 BEATS_MAX_TOKENS = pp_config.GEN_MAX_TOKENS
+STAGE1_MAX_TOKENS = pp_config.GEN_MAX_TOKENS
+
+IMAGES_DIR = "images"
+REFS_PENDING_DIR = "refs"
+BIBLE_DIR = "bibles"

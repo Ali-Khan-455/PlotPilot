@@ -110,6 +110,16 @@ def latest_pass(conn, chunk_id, kind, after_id=None):
         (chunk_id, kind, after_id or 0)).fetchone()
 
 
+def set_chunk_status(conn, chunk_id, status) -> None:
+    with conn:
+        conn.execute("UPDATE chunks SET status = ? WHERE id = ?", (status, chunk_id))
+
+
+def pass_is_bound(conn, pass_id) -> bool:
+    """True if a bible_versions row cites this pass as its source_pass_id (it has been merged)."""
+    return conn.execute("SELECT 1 FROM bible_versions WHERE source_pass_id = ?", (pass_id,)).fetchone() is not None
+
+
 def ok_passes(conn, chunk_id, kinds, after_id=None):
     """All ok passes (verdict IS NULL) of the given kinds, oldest first. Unlike PlotPilot's own
     ok_passes, this also selects `note` — a beat_revision pass's persisted identity JSON lives there."""

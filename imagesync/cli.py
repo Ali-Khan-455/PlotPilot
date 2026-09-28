@@ -11,7 +11,7 @@ from pathlib import Path
 import anthropic
 
 from imagesync import config, db
-from imagesync.pipeline import _seconds, _stamp, run_revise, run_stage0
+from imagesync.pipeline import approve_refs, run_regenerate, run_revise, run_stage0, run_stage1, _seconds, _stamp
 from imagesync.source import SourceError, load_novel, open_plotpilot
 from imagesync.spec import load_spec
 from plotpilot import config as pp_config
@@ -99,10 +99,17 @@ def main(argv=None, client=None) -> int:
     ap.add_argument("--sub-style", choices=["a", "b", "c", "d"], help="Lock the novel's sub-style (chunk 1).")
     ap.add_argument("--aspect", choices=config.ASPECTS, help=f"Aspect ratio (default {config.DEFAULT_ASPECT}).")
     ap.add_argument("--gen-model", default=pp_config.GEN_MODEL, help="Model for Stage 0 (beats) calls.")
+    ap.add_argument("--stage1-model", default=pp_config.GEN_MODEL, help="Model for Stage 1 (references) calls.")
     ap.add_argument("--revise-beat", nargs=2, metavar=("TIMECODE", "DESCRIPTION"),
                     help="Revise one beat: TIMECODE (e.g. 04-15, or 04-15_2 for the second occurrence of a "
                          "repeated timecode) and its new description.")
+    ap.add_argument("--regenerate", metavar="#Name: reason",
+                    help="Re-run Stage 1 scoped to one reference, e.g. '#Kael: eye color was wrong'.")
+    ap.add_argument("--approve-refs", action="store_true",
+                    help="Merge the current chunk's pending references into the Visual Bible.")
     args = ap.parse_args(argv)
+    if sum(bool(x) for x in (args.approve_refs, args.regenerate, args.revise_beat)) > 1:
+        return fail("--approve-refs, --regenerate and --revise-beat can't be combined.")
     if not args.novel.is_file():
         return fail(f"Cannot read '{args.novel}': not a regular file.")
     slug = slug_for(args.novel)
@@ -130,21 +137,44 @@ def main(argv=None, client=None) -> int:
         if not locked:
             if args.revise_beat:
                 print("Note: --revise-beat ignored; the style isn't locked yet.")
+            elif args.regenerate:
+                print("Note: --regenerate ignored; the style isn't locked yet.")
+            elif args.approve_refs:
+                print("Note: --approve-refs ignored; the style isn't locked yet.")
             return code
         if args.revise_beat and not args.revise_beat[1].strip():
             return fail("--revise-beat needs a non-empty description.")
         rows = db.chunks(conn, novel_id)
         current = next(((r, c) for r, c in zip(rows, src.chunks) if r["status"] != "done"), None)
         if current is None:
-            print("Every chunk is fully processed; nothing left for Stage 0.")
+            print("Every chunk is fully processed.")
             return 0
         row, chunk = current
         llm = LLM(client if client is not None else (lambda: make_client()), config.LOG_DIR)
         try:
+            if args.approve_refs:
+                return approve_refs(conn, novel_id, row, spec=spec, slug=slug, title=src.title)
+            if args.regenerate:
+                return run_regenerate(conn, llm, spec, src, novel_id, row, chunk, args.regenerate,
+                                      stage1_model=args.stage1_model, slug=slug)
             if args.revise_beat:
                 return run_revise(conn, llm, spec, src, novel_id, row, chunk, *args.revise_beat,
                                   gen_model=args.gen_model, slug=slug)
-            return run_stage0(conn, llm, spec, src, novel_id, row, chunk, gen_model=args.gen_model, slug=slug)
+            while True:
+                if row["status"] == "ready":
+                    code = run_stage0(conn, llm, spec, src, novel_id, row, chunk, gen_model=args.gen_model,
+                                      slug=slug)
+                    if code != 0:
+                        return code
+                    row = db.chunks(conn, novel_id)[chunk.idx - 1]
+                    continue
+                if row["status"] in ("beats", "refs_pending"):
+                    return run_stage1(conn, llm, spec, src, novel_id, row, chunk, stage1_model=args.stage1_model,
+                                      slug=slug)
+                if row["status"] == "refs_approved":
+                    print("Stage 2 is not built yet (IS-4).")
+                    return 0
+                return fail(f"Chunk {chunk.idx} is in an unexpected status {row['status']!r}.")
         except (LLMError, anthropic.AnthropicError) as e:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}", file=sys.stderr)

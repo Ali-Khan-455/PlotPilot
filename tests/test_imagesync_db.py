@@ -81,3 +81,19 @@ def test_chunks_latest_pass_and_ok_passes(conn):
     assert ok[-1]["note"] == '{"b":1}'
     assert [o["id"] for o in db.ok_passes(conn, cid1, ["beat_revision"], after_id=p2)] == [r1]
     assert db.ok_passes(conn, cid2, ["beats"]) == []
+
+
+def test_set_chunk_status(conn):
+    novel(conn)
+    cid1 = conn.execute("SELECT id FROM chunks WHERE idx=1").fetchone()[0]
+    db.set_chunk_status(conn, cid1, "refs_pending")
+    assert conn.execute("SELECT status FROM chunks WHERE id=?", (cid1,)).fetchone()[0] == "refs_pending"
+
+
+def test_pass_is_bound(conn):
+    nid = novel(conn)
+    cid1 = conn.execute("SELECT id FROM chunks WHERE idx=1").fetchone()[0]
+    pid = db.add_pass(conn, nid, cid1, "refs", "m", "", "{}")
+    assert db.pass_is_bound(conn, pid) is False
+    db.add_bible_version(conn, nid, 1, "refs", "{}", "{}", source_pass_id=pid)
+    assert db.pass_is_bound(conn, pid) is True

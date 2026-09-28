@@ -8,7 +8,7 @@ import plotpilot.config as pp_config
 from imagesync import db as is_db
 from imagesync.cli import main
 from tests.fakes import FakeClient
-from tests.helpers import beats_reply, draft1, finish_novel, run
+from tests.helpers import beats_reply, draft1, finish_novel, one_new_character, refs_reply, run
 
 
 def im(*args, client=None):
@@ -35,9 +35,11 @@ def chunk_status(idx):
         return conn.execute("SELECT status FROM chunks WHERE idx = ?", (idx,)).fetchone()[0]
 
 
-def lock_and_run_stage0(cwd, scenes=CHUNK1_SCENES, client=None):
-    """Lock the style and run chunk 1's Stage 0 for real, returning the client used."""
-    client = client or FakeClient([beats_reply(scenes)])
+def lock_and_run_stage0(cwd, scenes=CHUNK1_SCENES, client=None, stage1_reply=None):
+    """Lock the style and run chunk 1's Stage 0, then its Stage 1 (a non-empty delta by default, so the
+    chunk lands at refs_pending rather than auto-merging into a second bible_versions row), returning
+    the client used."""
+    client = client or FakeClient([beats_reply(scenes), stage1_reply or one_new_character()])
     assert im("--sub-style", "c", client=client) == 0
     return client
 
@@ -86,7 +88,7 @@ def test_dominant_module(cwd, capsys, chapters, modules, letter, module):
 
 def test_style_lock_stored(cwd, capsys):
     finish_novel(cwd)
-    client = FakeClient([beats_reply(CHUNK1_SCENES)])
+    client = FakeClient([beats_reply(CHUNK1_SCENES), one_new_character()])
     assert im("--sub-style", "c", client=client) == 0
     [(chunk_idx, stage, js)] = versions()
     assert chunk_idx is None and stage == "style_lock"
@@ -102,7 +104,7 @@ def test_style_lock_stored(cwd, capsys):
 
 def test_aspect_and_locked_note(cwd, capsys):
     finish_novel(cwd, modules=("B", "A"))
-    client = FakeClient([beats_reply(CHUNK1_SCENES)])
+    client = FakeClient([beats_reply(CHUNK1_SCENES), one_new_character()])
     im("--sub-style", "b", "--aspect", "9:16", client=client)
     assert json.loads(versions()[0][2])["style_lock"]["aspect"] == "9:16"
     assert json.loads(versions()[0][2])["style_lock"]["genre_color_default"] == "B"
@@ -126,7 +128,7 @@ def test_invalid_aspect_refused(cwd):
 ])
 def test_hash_mismatch_refused(cwd, capsys, tamper, which):
     finish_novel(cwd)
-    im("--sub-style", "c", client=FakeClient([beats_reply(CHUNK1_SCENES)]))
+    im("--sub-style", "c", client=FakeClient([beats_reply(CHUNK1_SCENES), one_new_character()]))
     with sqlite3.connect(pp_config.DB_PATH) as conn:
         conn.execute(tamper)
     capsys.readouterr()
@@ -148,7 +150,8 @@ def test_suggested_confirm_command_keeps_a_non_default_aspect(cwd, capsys):
     out = capsys.readouterr().out
     assert "Confirm with --sub-style c --aspect 9:16, or pick another." in out
     # exactly the suggested command
-    im("--sub-style", "c", "--aspect", "9:16", client=FakeClient([beats_reply(CHUNK1_SCENES)]))
+    im("--sub-style", "c", "--aspect", "9:16",
+      client=FakeClient([beats_reply(CHUNK1_SCENES), one_new_character()]))
     assert json.loads(versions()[0][2])["style_lock"]["aspect"] == "9:16"
 
 
@@ -159,7 +162,7 @@ def test_stage0_happy_path(cwd, capsys):
     finish_novel(cwd)
     capsys.readouterr()
     client = lock_and_run_stage0(cwd)
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2  # Stage 0, then Stage 1 in the same invocation
     msg = client.calls[0]["messages"][0]["content"]
     assert "INPUT MODE: PLOTPILOT" in msg
     assert "Chapter 1" in msg  # chapters text
@@ -170,25 +173,41 @@ def test_stage0_happy_path(cwd, capsys):
     [p] = is_passes("beats")
     assert p["verdict"] is None
     assert json.loads(p["note"])["identity"] == [{"scene_index": 0, "suffix": "", "continues": None}]
-    assert chunk_status(1) == "beats"
+    assert chunk_status(1) == "refs_pending"
     out = capsys.readouterr().out
-    assert "Chunk 1 beats stored (1 beats). Stage 1 (references) is not built yet (IS-3)." in out
-    assert "Stage 0" not in out.replace("Chunk 1 beats stored", "")  # no stale "not built yet" text
+    assert "Chunk 1 beats stored (1 beats)." in out
+    assert "not built yet (IS-3)" not in out  # no stale IS-2 print
 
 
-def test_stage0_rerun_makes_zero_calls_and_reprints(cwd, capsys):
+def test_stage1_pending_rerun_makes_zero_calls_and_reprints(cwd, capsys):
+    """Once chunk 1 is at refs_pending (Stage 0 and Stage 1 both already ran), a further rerun makes
+    zero calls and just reprints the gate summary."""
     finish_novel(cwd)
     lock_and_run_stage0(cwd)
+    assert chunk_status(1) == "refs_pending"
     capsys.readouterr()
     client2 = FakeClient([])
     assert im(client=client2) == 0
     assert client2.calls == []
-    assert "Chunk 1 beats stored (1 beats). Stage 1 (references) is not built yet (IS-3)." in capsys.readouterr().out
+    assert "new reference(s) pending" in capsys.readouterr().out
+
+
+def test_stage1_rerun_after_stage0_only_continues_into_stage1(cwd, capsys):
+    """A rerun after Stage 0 alone (Stage 1 not yet reached, e.g. it failed to parse) continues into
+    Stage 1 with one further call; a rerun after THAT makes zero further calls."""
+    finish_novel(cwd)
+    client = FakeClient([beats_reply(CHUNK1_SCENES), "not json", "not json"])
+    assert im("--sub-style", "c", client=client) == 1  # Stage 1 malformed twice; fails clearly
+    assert chunk_status(1) == "beats"
+    client2 = FakeClient([one_new_character()])
+    assert im(client=client2) == 0
+    assert len(client2.calls) == 1
+    assert chunk_status(1) == "refs_pending"
 
 
 def test_stage0_malformed_once_then_good(cwd):
     finish_novel(cwd)
-    client = FakeClient(["not json", beats_reply(CHUNK1_SCENES)])
+    client = FakeClient(["not json", beats_reply(CHUNK1_SCENES), one_new_character()])
     assert im("--sub-style", "c", client=client) == 0
     rows = is_passes("beats")
     assert [r["verdict"] for r in rows] == ["PARSE_FAILED", None]
@@ -241,7 +260,8 @@ def test_stage0_continues_accepted_and_resolved_by_code(cwd):
     _mark_chunk1_done_with_continuity(cwd)
     from imagesync.source import load_novel, open_plotpilot
     chunk2_scenes = load_novel(open_plotpilot(pp_config.DB_PATH), "book").chunks[1].scenes
-    client = FakeClient([beats_reply(chunk2_scenes, continues="a totally different string the model wrote")])
+    client = FakeClient([beats_reply(chunk2_scenes, continues="a totally different string the model wrote"),
+                        refs_reply()])
     assert im(client=client) == 0
     chunk2_row = is_passes("beats")[-1]
     identity = json.loads(chunk2_row["note"])["identity"]

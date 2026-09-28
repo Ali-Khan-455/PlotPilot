@@ -80,3 +80,16 @@ def beats_reply(scenes, continues=None):
     return json.dumps({"beats": [{"timecode": tc, "narration": f"narration for {tc}", "detail": [],
                                   "continues": continues if i == 0 else None}
                                  for i, (tc, _) in enumerate(scenes)]})
+
+
+def refs_reply(new_references=(), characters=(), locations=(), objects=()):
+    """A scripted Stage 1 reply: the raw {"new_references", "bible_update"} shape, unvalidated."""
+    return json.dumps({"new_references": list(new_references),
+                       "bible_update": {"characters": list(characters), "locations": list(locations),
+                                        "objects": list(objects)}})
+
+
+def one_new_character(tag="Kael", descriptor="a descriptor"):
+    """A scripted Stage 1 reply proposing exactly one new character reference."""
+    return refs_reply([{"type": "character", "tag": tag, "descriptor": descriptor}],
+                      characters=[{"name": tag, "tag": tag, "descriptor": descriptor}])
