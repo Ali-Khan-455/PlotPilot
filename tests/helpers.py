@@ -75,10 +75,12 @@ def kinds(*ks):
     return q(f"SELECT kind, model, module, verdict FROM passes WHERE kind IN ({marks}) ORDER BY id", *ks)
 
 
-def beats_reply(scenes, continues=None):
-    """A scripted valid Stage 0 reply: one beat per (timecode, description) in `scenes`."""
-    return json.dumps({"beats": [{"timecode": tc, "narration": f"narration for {tc}", "detail": [],
-                                  "continues": continues if i == 0 else None}
+def beats_reply(scenes, continues=None, narration=None):
+    """A scripted valid Stage 0 reply: one beat per (timecode, description) in `scenes`. `narration`,
+    when given, replaces the default "narration for {tc}" text for every beat (used so a --regenerate
+    target's name can be made to appear in the chunk's own beats)."""
+    return json.dumps({"beats": [{"timecode": tc, "narration": narration or f"narration for {tc}",
+                                  "detail": [], "continues": continues if i == 0 else None}
                                  for i, (tc, _) in enumerate(scenes)]})
 
 

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -35,11 +36,12 @@ def chunk_status(idx):
         return conn.execute("SELECT status FROM chunks WHERE idx = ?", (idx,)).fetchone()[0]
 
 
-def lock_and_run_stage0(cwd, scenes=CHUNK1_SCENES, client=None, stage1_reply=None):
+def lock_and_run_stage0(cwd, scenes=CHUNK1_SCENES, client=None, stage1_reply=None, beats_narration=None):
     """Lock the style and run chunk 1's Stage 0, then its Stage 1 (a non-empty delta by default, so the
     chunk lands at refs_pending rather than auto-merging into a second bible_versions row), returning
     the client used."""
-    client = client or FakeClient([beats_reply(scenes), stage1_reply or one_new_character()])
+    client = client or FakeClient([beats_reply(scenes, narration=beats_narration),
+                                   stage1_reply or one_new_character()])
     assert im("--sub-style", "c", client=client) == 0
     return client
 
@@ -332,3 +334,296 @@ def test_revise_beat_ignored_before_lock(cwd, capsys):
     assert im("--revise-beat", "00-00", "new description", client=client) == 0
     assert client.calls == []
     assert "Note: --revise-beat ignored; the style isn't locked yet." in capsys.readouterr().out
+
+
+# --- Stage 1 (IS-3) ---------------------------------------------------------------------------------
+
+
+def refs_txt():
+    return (Path("images") / "book" / "chunk-01" / "refs.txt").read_text()
+
+
+def bible_md():
+    return Path("bibles") / "book.md"
+
+
+def pending_files():
+    return sorted(Path("refs").glob("book.chunk-*.delta-*.pending.json"))
+
+
+def latest_bible():
+    with is_conn() as conn:
+        return json.loads(conn.execute("SELECT json FROM bible_versions ORDER BY id DESC LIMIT 1")
+                          .fetchone()[0])
+
+
+def test_regenerate_ignored_before_lock(cwd, capsys):
+    finish_novel(cwd)
+    capsys.readouterr()
+    client = FakeClient([])
+    assert im("--regenerate", "#Kael: reason", client=client) == 0
+    assert client.calls == []
+    assert "Note: --regenerate ignored; the style isn't locked yet." in capsys.readouterr().out
+
+
+def test_approve_refs_ignored_before_lock(cwd, capsys):
+    finish_novel(cwd)
+    capsys.readouterr()
+    client = FakeClient([])
+    assert im("--approve-refs", client=client) == 0
+    assert client.calls == []
+    assert "Note: --approve-refs ignored; the style isn't locked yet." in capsys.readouterr().out
+
+
+def test_combining_flags_refused_with_no_call(cwd):
+    finish_novel(cwd)
+    client = FakeClient([])
+    assert im("--approve-refs", "--regenerate", "#Kael: reason", client=client) == 1
+    assert client.calls == []
+    assert im("--approve-refs", "--revise-beat", "00-00", "d", client=client) == 1
+    assert client.calls == []
+
+
+def test_stage1_no_new_references_merges_immediately(cwd, capsys):
+    finish_novel(cwd)
+    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply()])
+    assert im("--sub-style", "c", client=client) == 0
+    assert chunk_status(1) == "refs_approved"
+    chunk_idx, stage, _ = versions()[1]
+    assert chunk_idx == 1 and stage == "refs"
+    assert "No new references." in capsys.readouterr().out
+    assert bible_md().read_text().startswith("=== VISUAL BIBLE — book ===")
+    assert pending_files() == []
+
+
+def test_stage1_new_references_writes_refs_txt_and_pending_file(cwd, capsys):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael", "a tall elder"))
+    assert chunk_status(1) == "refs_pending"
+    txt = refs_txt()
+    assert "a tall elder" in txt and "#Kael" in txt
+    assert "digital manhwa/webtoon illustration style" in txt  # locked suffix appended
+    [pending] = pending_files()
+    delta = json.loads(pending.read_text())
+    assert delta["new_references"][0]["tag"] == "Kael"
+    assert not bible_md().exists()
+    out = capsys.readouterr().out
+    assert "1 new reference(s) pending" in out
+
+
+def test_stage1_pending_file_edit_survives_a_rerun_with_zero_calls(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael", "original descriptor"))
+    [pending] = pending_files()
+    delta = json.loads(pending.read_text())
+    delta["bible_update"]["characters"][0]["descriptor"] = "operator-edited descriptor"
+    pending.write_text(json.dumps(delta))
+    client2 = FakeClient([])
+    assert im(client=client2) == 0
+    assert client2.calls == []
+    assert json.loads(pending.read_text())["bible_update"]["characters"][0]["descriptor"] == \
+        "operator-edited descriptor"
+
+
+def test_stage1_reproposal_of_existing_tag_rejected(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    assert chunk_status(1) == "refs_approved"
+    _mark_chunk1_done_with_continuity(cwd, last_entry="- [chunk 1 | beat 00-00] Kael introduced")
+    from imagesync.source import load_novel, open_plotpilot
+    chunk2_scenes = load_novel(open_plotpilot(pp_config.DB_PATH), "book").chunks[1].scenes
+    dup = one_new_character("Kael")
+    client = FakeClient([beats_reply(chunk2_scenes), dup, dup])  # rejected, retried once, fails clearly
+    assert im(client=client) == 1  # chunk 2's Stage 1 re-proposes an existing tag: rejected
+
+
+def test_approve_refs_sets_reference_generated_and_advances_status(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    assert chunk_status(1) == "refs_approved"
+    b = latest_bible()
+    assert b["characters"][0]["tag"] == "Kael"
+    assert b["characters"][0]["reference_generated"] is True
+    assert pending_files() == []
+    assert bible_md().exists()
+
+
+def test_approve_refs_refused_when_not_pending(cwd):
+    finish_novel(cwd)
+    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply()])
+    im("--sub-style", "c", client=client)  # merges immediately: refs_approved, not refs_pending
+    assert im("--approve-refs", client=FakeClient([])) == 1
+
+
+def test_approve_refs_missing_pending_file_refused(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    [pending] = pending_files()
+    pending.unlink()
+    assert im("--approve-refs", client=FakeClient([])) == 1
+
+
+def test_approve_refs_replayed_accept_refused(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    # Force the chunk back to refs_pending and recreate a pending file bound to the now-bound pass, to
+    # exercise the IntegrityError-catching replay refusal directly (through the CLI this state is
+    # otherwise unreachable, since a real approval always advances past refs_pending).
+    from imagesync.pipeline import _pending_path, approve_refs
+    from imagesync.source import load_novel, open_plotpilot
+    from imagesync.spec import load_spec
+    conn = is_db.connect(is_config.DB_PATH)
+    novel_id = conn.execute("SELECT id FROM novels").fetchone()[0]
+    chunk_row = dict(is_db.chunks(conn, novel_id)[0])
+    pass_row = conn.execute("SELECT id, note FROM passes WHERE kind='refs' ORDER BY id DESC LIMIT 1").fetchone()
+    is_db.set_chunk_status(conn, chunk_row["id"], "refs_pending")
+    chunk_row["status"] = "refs_pending"
+    bound = _pending_path("book", 1, pass_row["id"])
+    bound.parent.mkdir(parents=True, exist_ok=True)
+    bound.write_text(json.dumps(json.loads(pass_row["note"])["delta"]))
+    spec = load_spec()
+    src = load_novel(open_plotpilot(pp_config.DB_PATH), "book")
+    code = approve_refs(conn, novel_id, chunk_row, spec=spec, slug="book", title=src.title)
+    assert code == 1
+    conn.close()
+
+
+def test_regenerate_pending_reference_hides_target_and_sends_reason(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael", "original descriptor"),
+                       beats_narration="Kael showed up.")
+    client = FakeClient([one_new_character("Kael", "new descriptor")])
+    assert im("--regenerate", "#Kael: eye color was wrong", client=client) == 0
+    msg = client.calls[0]["messages"][0]["content"]
+    assert "#Kael" not in msg.split("regenerate #Kael")[0]  # tag index omits the target
+    assert "regenerate #Kael: eye color was wrong" in msg
+    [pending] = pending_files()
+    delta = json.loads(pending.read_text())
+    assert delta["new_references"][0]["descriptor"] == "new descriptor"
+
+
+def test_regenerate_unresolvable_target_refused_with_no_call(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    client = FakeClient([])
+    assert im("--regenerate", "#Ghost: reason", client=client) == 1
+    assert client.calls == []
+
+
+def test_regenerate_empty_reason_refused_with_no_call(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    client = FakeClient([])
+    assert im("--regenerate", "#Kael:   ", client=client) == 1
+    assert client.calls == []
+
+
+def test_regenerate_from_ready_or_beats_refused(cwd):
+    finish_novel(cwd)
+    client = FakeClient([])
+    assert im("--sub-style", "c", "--regenerate", "#Kael: reason", client=client) == 1
+    assert client.calls == []
+
+
+def test_regenerate_still_pending_then_approve_keeps_unrelated_entry_and_appends_normally(cwd):
+    finish_novel(cwd)
+    two = refs_reply(
+        [{"type": "character", "tag": "Kael", "descriptor": "d1"}, {"type": "character", "tag": "Mira", "descriptor": "d2"}],
+        characters=[{"name": "Kael", "tag": "Kael", "descriptor": "d1"},
+                   {"name": "Mira", "tag": "Mira", "descriptor": "d2"}])
+    lock_and_run_stage0(cwd, stage1_reply=two, beats_narration="Kael and Mira showed up.")
+    client = FakeClient([one_new_character("Kael", "regenerated descriptor")])
+    assert im("--regenerate", "#Kael: reason", client=client) == 0
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    b = latest_bible()
+    tags = {c["tag"]: c for c in b["characters"]}
+    assert tags["Kael"]["descriptor"] == "regenerated descriptor"
+    assert tags["Mira"]["descriptor"] == "d2"
+    assert len(b["characters"]) == 2
+
+
+def test_regenerate_already_approved_then_approve_replaces_only_that_entry(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael", "original"), beats_narration="Kael showed up.")
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    client = FakeClient([one_new_character("Kael", "regenerated")])
+    assert im("--regenerate", "#Kael: reason", client=client) == 0
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    b = latest_bible()
+    assert len(b["characters"]) == 1
+    assert b["characters"][0]["descriptor"] == "regenerated"
+    assert b["characters"][0]["slot"] == 1
+
+
+def test_regenerate_twice_before_one_approve_replaces_both(cwd):
+    finish_novel(cwd)
+    two = refs_reply(
+        [{"type": "character", "tag": "Kael", "descriptor": "d1"}, {"type": "character", "tag": "Mira", "descriptor": "d2"}],
+        characters=[{"name": "Kael", "tag": "Kael", "descriptor": "d1"},
+                   {"name": "Mira", "tag": "Mira", "descriptor": "d2"}])
+    lock_and_run_stage0(cwd, stage1_reply=two, beats_narration="Kael and Mira showed up.")
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    assert im("--regenerate", "#Kael: r1", client=FakeClient([one_new_character("Kael", "kael2")])) == 0
+    assert im("--regenerate", "#Mira: r2",
+             client=FakeClient([one_new_character("Mira", "mira2")])) == 0
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    b = latest_bible()
+    tags = {c["tag"]: c for c in b["characters"]}
+    assert tags["Kael"]["descriptor"] == "kael2" and tags["Mira"]["descriptor"] == "mira2"
+    assert len(b["characters"]) == 2
+
+
+def test_regenerate_pending_approve_regenerate_same_tag_again_approve_again(cwd):
+    """Round-4 regression: _pending_refs_pass must not resurrect the original, now-superseded pass."""
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael", "d0"), beats_narration="Kael showed up.")
+    assert im("--regenerate", "#Kael: r1", client=FakeClient([one_new_character("Kael", "d1")])) == 0
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    assert im("--regenerate", "#Kael: r2", client=FakeClient([one_new_character("Kael", "d2")])) == 0
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    b = latest_bible()
+    assert len(b["characters"]) == 1
+    assert b["characters"][0]["descriptor"] == "d2"
+
+
+def test_regenerate_first_of_two_pending_keeps_slot_order(cwd):
+    """Round-7 regression: regenerating a still-pending target must not reassign slots by moving it
+    to the end of new_references."""
+    finish_novel(cwd)
+    two = refs_reply(
+        [{"type": "character", "tag": "Char1", "descriptor": "d1"},
+         {"type": "character", "tag": "Char2", "descriptor": "d2"}],
+        characters=[{"name": "Char1", "tag": "Char1", "descriptor": "d1"},
+                   {"name": "Char2", "tag": "Char2", "descriptor": "d2"}])
+    lock_and_run_stage0(cwd, stage1_reply=two, beats_narration="Char1 and Char2 showed up.")
+    client = FakeClient([one_new_character("Char1", "regenerated")])
+    assert im("--regenerate", "#Char1: reason", client=client) == 0
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    b = latest_bible()
+    tags = {c["tag"]: c["slot"] for c in b["characters"]}
+    assert tags["Char1"] == 1
+    assert tags["Char2"] == 2
+
+
+def test_regenerate_rewrites_refs_txt_in_same_invocation(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael", "original"), beats_narration="Kael showed up.")
+    client = FakeClient([one_new_character("Kael", "regenerated descriptor")])
+    assert im("--regenerate", "#Kael: reason", client=client) == 0
+    assert "regenerated descriptor" in refs_txt()
+
+
+def test_chunk2_stage1_lists_chunk1_approved_references(cwd):
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    _mark_chunk1_done_with_continuity(cwd)
+    from imagesync.source import load_novel, open_plotpilot
+    chunk2_scenes = load_novel(open_plotpilot(pp_config.DB_PATH), "book").chunks[1].scenes
+    client = FakeClient([beats_reply(chunk2_scenes), refs_reply()])
+    assert im(client=client) == 0
+    stage1_msg = client.calls[1]["messages"][0]["content"]
+    assert "#Kael" in stage1_msg and "reference generated: yes" in stage1_msg
