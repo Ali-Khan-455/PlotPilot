@@ -332,6 +332,9 @@ Once all references are confirmed, emit the batch.
 
 **Batching:** ~30 beats per delivery. Never add filler, never drop beats. After each batch: `Part N of M — covers [first timecode] to [last timecode]. Type "next" for the next part.` Then stop.
 
+When the last 3 beats of the previous batch are included for shot-cadence context, they are marked
+`PREVIOUS BATCH (context only, no prompt needed)` and must not be re-emitted as new prompts.
+
 **Continuing on "next":** resume from the next unused beat. Don't restart, don't repeat or alter delivered prompts, carry forward every reference and continuity state.
 
 **After the final batch of a chunk:** emit one additional manifest block:
@@ -347,6 +350,24 @@ timecode,shot_type,first_5_words
 Then emit the completed Visual Bible block for the operator to save. Include new Continuity Log entries and any per-beat genre overrides.
 
 **END OF STAGE 2**
+
+---
+
+## BIBLE UPDATE (end-of-Stage-2 continuity call)
+
+**COPY EVERYTHING BELOW**
+
+You are updating the Visual Bible's Continuity Log once a chunk's Stage 2 batches are complete.
+
+Read this chunk's beat list and its delivered image prompts together.
+
+Identify every state change to a tagged character, location, or object that this chunk's own beats establish: an object picked up or lost, a wound, a change of clothing, damage to a location, or any change from the state most recently recorded for it. Include a change only when this chunk's own beats directly support it.
+
+For each state change, name the element's `#Tag`, what it changed from, what it changed to, and a one-line reason quoting or paraphrasing the beat that established it.
+
+Never invent a state change the beats don't support. Never restate a state this chunk didn't itself change. A later state supersedes an earlier one — it is never edited or deleted.
+
+**END OF BIBLE UPDATE**
 
 ---
 
@@ -481,11 +502,12 @@ Note: when `current_state` is absent or empty, the tool defaults it per type: `"
       "scene": "string",            // scene composition only
       "shot_type": "medium-wide",
       "refs_used": ["VillageElder", "Sword"],
-      "genre_override": "Dark action" | null
+      "genre_override": "A" | "B" | "C" | "D" | null
     }
   ]
 }
 ```
+Note: `genre_override`, when given, is one of the four drafting module letters (A/B/C/D); code resolves it to a colour treatment via config.MODULE_TO_COLOR — never a free-text label.
 Note: the final `prompt` string, the `@Name` stack, the locked style suffix, and `manifest_rows` are not contract fields. The tool appends the suffix from this spec file, formats `@Name` tags from `refs_used`, and builds the manifest from the stored prompts.
 
 **Bible update (end-of-Stage-2 continuity call):**

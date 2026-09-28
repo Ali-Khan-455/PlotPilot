@@ -22,6 +22,9 @@ def test_real_spec_loads():
     assert spec.mode_a_line == "INPUT MODE: PLOTPILOT"
     assert spec.continuity_log_header == "CONTINUITY LOG (append-only)"
     assert spec.regenerate_line == "regenerate #Name: [reason]"
+    assert "Continuity Log" in spec.continuity_prompt and "Never invent a state change" in spec.continuity_prompt
+    assert spec.stage2_context_label == "PREVIOUS BATCH (context only, no prompt needed)"
+    assert '"A" | "B" | "C" | "D" | null' in spec.contracts.stage2
 
 
 def _damaged(tmp_path, old, new):
@@ -42,6 +45,8 @@ def _damaged(tmp_path, old, new):
     ("```\nINPUT MODE: PLOTPILOT", "INPUT MODE: PLOTPILOT", "Mode A"),
     ("CONTINUITY LOG (append-only)", "CONTINUITY LOG (appends only)", "CONTINUITY LOG"),
     ('"regenerate #Name: [reason]"', '"regenerate #Tag: [reason]"', "regenerate"),
+    ("## BIBLE UPDATE (end-of-Stage-2 continuity call)", "## BIBLE UPDATE", "BIBLE UPDATE"),
+    ("PREVIOUS BATCH (context only, no prompt needed)", "PREVIOUS BATCH (context only)", "PREVIOUS BATCH"),
 ])
 def test_structure_changes_fail_closed(tmp_path, old, new, what):
     with pytest.raises((SpecError, ValueError), match=what):

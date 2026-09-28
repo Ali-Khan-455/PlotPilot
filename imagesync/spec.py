@@ -17,6 +17,8 @@ VISUAL_BIBLE = "THE VISUAL BIBLE"
 MODE_A_MARKER = "**Mode A — PlotPilot (preferred):**"
 CONTINUITY_LOG_LINE = "CONTINUITY LOG (append-only)"
 REGENERATE_LINE = "regenerate #Name: [reason]"
+BIBLE_UPDATE_HEADING_RE = re.compile(r"^## (BIBLE UPDATE) \(.*\)$")
+STAGE2_CONTEXT_LABEL = "PREVIOUS BATCH (context only, no prompt needed)"
 SUB_STYLE_RE = re.compile(r"^- \*\*\(([a-z])\) ([^*]+)\*\* — (.+)$")
 COLOR_RE = re.compile(r"^- ([^:]+): (.+)$")
 CONTRACT_MARKERS = ("**Stage 0 output:**", "**Stage 1 output:**", "**Stage 2 batch output:**",
@@ -47,6 +49,8 @@ class Spec:
     mode_a_line: str
     continuity_log_header: str
     regenerate_line: str
+    continuity_prompt: str
+    stage2_context_label: str
 
 
 def _split_contracts(text: str) -> Contracts:
@@ -127,6 +131,12 @@ def _regenerate_line(stage1_text: str) -> str:
     return REGENERATE_LINE
 
 
+def _stage2_context_label(stage2_text: str) -> str:
+    if STAGE2_CONTEXT_LABEL not in stage2_text:
+        raise SpecError(f"STAGE 2 has no {STAGE2_CONTEXT_LABEL!r} line")
+    return STAGE2_CONTEXT_LABEL
+
+
 def load_spec(path: Path = config.SPEC_PATH) -> Spec:
     """Checks that config.MODULE_TO_COLOR's labels exist in the spec. That guards IS-4's later lookup
     colors[MODULE_TO_COLOR[bible genre_color_default]] (the Bible stores the module letter); it does not
@@ -137,5 +147,10 @@ def load_spec(path: Path = config.SPEC_PATH) -> Spec:
     mode_a_line = _first_fence_after(load_section(path, INPUT_MODES), MODE_A_MARKER)
     continuity_log_header = _continuity_log_header(load_section(path, VISUAL_BIBLE))
     regenerate_line = _regenerate_line(stages["STAGE 1"].text)
+    bible_update = load_prompts(path, heading_re=BIBLE_UPDATE_HEADING_RE, key=lambda m: m[1],
+                                required=("BIBLE UPDATE",))
+    continuity_prompt = bible_update["BIBLE UPDATE"].text
+    stage2_context_label = _stage2_context_label(stages["STAGE 2"].text)
     return Spec({k: stages[k] for k in STAGES}, _suffix(style), _sub_styles(style), _colors(style),
-                contracts, mode_a_line, continuity_log_header, regenerate_line)
+                contracts, mode_a_line, continuity_log_header, regenerate_line, continuity_prompt,
+                stage2_context_label)

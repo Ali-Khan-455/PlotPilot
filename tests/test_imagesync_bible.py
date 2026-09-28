@@ -251,3 +251,109 @@ def test_render_suffix_raises_on_leftover_bracket(monkeypatch):
     b = empty_bible()
     with pytest.raises(SpecError):
         bible._render_suffix(bad_spec, b, module="A")
+
+
+# ---- merge_continuity ----
+
+def cont_entry(element="Sword", from_="sheathed", to="drawn", reason="he drew it", beat="04-15"):
+    return {"beat": beat, "element": element, "from": from_, "to": to, "reason": reason}
+
+
+def test_merge_continuity_appends_rendered_line_and_updates_current_state():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)  # gives us tag "Char1"
+    entry = cont_entry(element="Char1", from_="clean", to="injured", reason="took a hit")
+    merged = bible.merge_continuity(b, [entry], chunk_idx=2)
+    assert merged["continuity_log"] == ["[chunk 2 | beat 04-15] #Char1 clean → injured took a hit"]
+    assert merged["characters"][0]["current_state"] == "injured"
+    # nothing else on the row changed
+    assert merged["characters"][0]["slot"] == b["characters"][0]["slot"]
+    assert merged["characters"][0]["descriptor"] == b["characters"][0]["descriptor"]
+
+
+def test_merge_continuity_never_mutates_or_removes_existing_lines():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    b["continuity_log"] = ["[chunk 1 | beat 01-00] #Char1 clean → dirty got mud on it"]
+    merged = bible.merge_continuity(b, [cont_entry(element="Char1", from_="dirty", to="clean")], chunk_idx=2)
+    assert merged["continuity_log"][0] == "[chunk 1 | beat 01-00] #Char1 clean → dirty got mud on it"
+    assert len(merged["continuity_log"]) == 2
+    assert b["continuity_log"] == ["[chunk 1 | beat 01-00] #Char1 clean → dirty got mud on it"]  # input untouched
+
+
+def test_merge_continuity_last_entry_for_a_tag_wins_within_one_delta():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    entries = [cont_entry(element="Char1", to="injured"), cont_entry(element="Char1", to="bandaged")]
+    merged = bible.merge_continuity(b, entries, chunk_idx=2)
+    assert merged["characters"][0]["current_state"] == "bandaged"
+    assert len(merged["continuity_log"]) == 2
+
+
+# ---- validate_continuity ----
+
+class FakeBeat:
+    def __init__(self, timecode, suffix=""):
+        self.timecode, self.suffix = timecode, suffix
+
+
+def cont_obj(entries):
+    return {"continuity_log_entries": entries}
+
+
+def test_validate_continuity_happy_path_strips_hashes():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    beats = [FakeBeat("04-15")]
+    obj = cont_obj([cont_entry(element="#Char1", beat="#04-15")])
+    out = bible.validate_continuity(obj, b, beats)
+    assert out["continuity_log_entries"][0]["element"] == "Char1"
+    assert out["continuity_log_entries"][0]["beat"] == "04-15"
+
+
+def test_validate_continuity_unknown_element_raises():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    beats = [FakeBeat("04-15")]
+    with pytest.raises(ParseError, match="element"):
+        bible.validate_continuity(cont_obj([cont_entry(element="Nobody", beat="04-15")]), b, beats)
+
+
+def test_validate_continuity_unknown_beat_raises():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    beats = [FakeBeat("04-15")]
+    with pytest.raises(ParseError, match="beat"):
+        bible.validate_continuity(cont_obj([cont_entry(element="Char1", beat="99-99")]), b, beats)
+
+
+def test_validate_continuity_empty_entries_valid():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    assert bible.validate_continuity(cont_obj([]), b, [FakeBeat("04-15")]) == {"continuity_log_entries": []}
+
+
+def test_validate_continuity_non_str_field_raises():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    beats = [FakeBeat("04-15")]
+    entry = cont_entry(element="Char1", beat="04-15")
+    entry["reason"] = 5
+    with pytest.raises(ParseError, match="reason"):
+        bible.validate_continuity(cont_obj([entry]), b, beats)
+
+
+def test_validate_continuity_wrong_keys_raises():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    beats = [FakeBeat("04-15")]
+    entry = cont_entry(element="Char1", beat="04-15")
+    del entry["reason"]
+    with pytest.raises(ParseError):
+        bible.validate_continuity(cont_obj([entry]), b, beats)
+
+
+# ---- merge's replace_tags branch never overwrites current_state (round-4 Required #2) ----
+
+def test_merge_replace_tags_preserves_continuity_set_current_state():
+    b = bible.merge(empty_bible(), _chars(1), chunk_idx=1)
+    b = bible.merge_continuity(b, [cont_entry(element="Char1", from_="clean", to="injured")], chunk_idx=2)
+    assert b["characters"][0]["current_state"] == "injured"
+    # a later --regenerate + --approve-refs cycle on the same tag (a replace) must not reset it
+    d = bible.validate_stage1(delta([ref("character", "Char1", "new descriptor")],
+                                    characters=[bu("Char1", descriptor="new descriptor")]))
+    merged = bible.merge(b, d, chunk_idx=3, replace_tags=frozenset({"Char1"}))
+    row = merged["characters"][0]
+    assert row["descriptor"] == "new descriptor"
+    assert row["current_state"] == "injured"

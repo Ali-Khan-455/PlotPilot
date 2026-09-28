@@ -9,7 +9,8 @@ import plotpilot.config as pp_config
 from imagesync import db as is_db
 from imagesync.cli import main
 from tests.fakes import FakeClient
-from tests.helpers import beats_reply, draft1, finish_novel, one_new_character, refs_reply, run
+from tests.helpers import (beats_reply, continuity_reply, draft1, finish_novel, one_new_character,
+                          refs_reply, run, stage2_reply)
 
 
 def im(*args, client=None):
@@ -241,7 +242,16 @@ def test_stage0_precheck_refuses_with_no_call(cwd, capsys):
 
 
 def _mark_chunk1_done_with_continuity(cwd, last_entry="- [chunk 1 | beat 00-00] Sword sheathed -> drawn (reason)"):
-    lock_and_run_stage0(cwd)
+    # Only drive chunk 1 through Stage 0/1 if it isn't already past that (some callers use this helper
+    # after chunk 1 has already been locked and approved elsewhere in the same test; re-running
+    # lock_and_run_stage0 there would just leave its own scripted replies unconsumed until the
+    # continuation loop reaches them at the wrong stage).
+    try:
+        already_started = chunk_status(1) != "ready"
+    except sqlite3.OperationalError:
+        already_started = False
+    if not already_started:
+        lock_and_run_stage0(cwd)
     conn = is_conn()
     novel_id = conn.execute("SELECT id FROM novels").fetchone()[0]
     chunk1_id = conn.execute("SELECT id FROM chunks WHERE idx = 1").fetchone()[0]
@@ -263,7 +273,7 @@ def test_stage0_continues_accepted_and_resolved_by_code(cwd):
     from imagesync.source import load_novel, open_plotpilot
     chunk2_scenes = load_novel(open_plotpilot(pp_config.DB_PATH), "book").chunks[1].scenes
     client = FakeClient([beats_reply(chunk2_scenes, continues="a totally different string the model wrote"),
-                        refs_reply()])
+                        refs_reply(), stage2_reply(chunk2_scenes), continuity_reply()])
     assert im(client=client) == 0
     chunk2_row = is_passes("beats")[-1]
     identity = json.loads(chunk2_row["note"])["identity"]
@@ -386,9 +396,12 @@ def test_combining_flags_refused_with_no_call(cwd):
 
 def test_stage1_no_new_references_merges_immediately(cwd, capsys):
     finish_novel(cwd)
-    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply()])
+    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply(), stage2_reply(CHUNK1_SCENES),
+                        continuity_reply()])
     assert im("--sub-style", "c", client=client) == 0
-    assert chunk_status(1) == "refs_approved"
+    # the loop's new `continue` on refs_approved carries it straight through Stage 2 and the
+    # continuity call in the same invocation, landing at bible_pending, not refs_approved
+    assert chunk_status(1) == "bible_pending"
     chunk_idx, stage, _ = versions()[1]
     assert chunk_idx == 1 and stage == "refs"
     assert "No new references." in capsys.readouterr().out
@@ -452,8 +465,9 @@ def test_approve_refs_sets_reference_generated_and_advances_status(cwd):
 
 def test_approve_refs_refused_when_not_pending(cwd):
     finish_novel(cwd)
-    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply()])
-    im("--sub-style", "c", client=client)  # merges immediately: refs_approved, not refs_pending
+    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply(), stage2_reply(CHUNK1_SCENES),
+                        continuity_reply()])
+    im("--sub-style", "c", client=client)  # merges immediately and continues on to bible_pending
     assert im("--approve-refs", client=FakeClient([])) == 1
 
 
@@ -641,7 +655,79 @@ def test_chunk2_stage1_lists_chunk1_approved_references(cwd):
     _mark_chunk1_done_with_continuity(cwd)
     from imagesync.source import load_novel, open_plotpilot
     chunk2_scenes = load_novel(open_plotpilot(pp_config.DB_PATH), "book").chunks[1].scenes
-    client = FakeClient([beats_reply(chunk2_scenes), refs_reply()])
+    client = FakeClient([beats_reply(chunk2_scenes), refs_reply(), stage2_reply(chunk2_scenes),
+                        continuity_reply()])
     assert im(client=client) == 0
     stage1_msg = client.calls[1]["messages"][0]["content"]
     assert "#Kael" in stage1_msg and "reference generated: yes" in stage1_msg
+
+
+# --- Stage 2, the manifest, and the continuity gate (IS-4) ------------------------------------------
+
+
+def manifest_csv():
+    return Path("images") / "book" / "manifest.csv"
+
+
+def test_accept_bible_ignored_before_lock(cwd, capsys):
+    finish_novel(cwd)
+    capsys.readouterr()
+    client = FakeClient([])
+    assert im("--accept-bible", client=client) == 0
+    assert client.calls == []
+    assert "Note: --accept-bible ignored; the style isn't locked yet." in capsys.readouterr().out
+
+
+def test_four_way_mutual_exclusion_includes_accept_bible(cwd):
+    finish_novel(cwd)
+    client = FakeClient([])
+    assert im("--approve-refs", "--accept-bible", client=client) == 1
+    assert client.calls == []
+    assert im("--accept-bible", "--regenerate", "#Kael: reason", client=client) == 1
+    assert client.calls == []
+
+
+def test_full_run_reaches_bible_pending_then_accept_bible_reaches_done(cwd, capsys):
+    finish_novel(cwd)
+    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply(), stage2_reply(CHUNK1_SCENES),
+                        continuity_reply()])
+    assert im("--sub-style", "c", client=client) == 0
+    assert chunk_status(1) == "bible_pending"
+    out = capsys.readouterr().out
+    assert "review" in out and "--accept-bible" in out
+    assert manifest_csv().exists()
+    assert (Path("images") / "book" / "chunk-01" / "batch-1.txt").exists()
+
+    assert im("--accept-bible", client=FakeClient([])) == 0
+    assert chunk_status(1) == "done"
+    assert bible_md().exists()
+    log = Path("logs") / "bible-accepts.log"
+    assert log.exists() and "chunk 1" in log.read_text()
+
+
+def test_bible_pending_rerun_via_cli_makes_zero_calls_and_reprints(cwd, capsys):
+    finish_novel(cwd)
+    client = FakeClient([beats_reply(CHUNK1_SCENES), refs_reply(), stage2_reply(CHUNK1_SCENES),
+                        continuity_reply()])
+    assert im("--sub-style", "c", client=client) == 0
+    assert chunk_status(1) == "bible_pending"
+    capsys.readouterr()
+    client2 = FakeClient([])
+    assert im(client=client2) == 0
+    assert client2.calls == []
+    assert "--accept-bible" in capsys.readouterr().out
+
+
+def test_loop_termination_guard_fails_cleanly_on_stage2_no_progress(cwd, monkeypatch, capsys):
+    """User Issue 1's own regression test: a run_stage2 that returns 0 without storing any pass must not
+    hang or exhaust OUTER_LOOP_CAP -- it fails on the very first non-progressing call."""
+    finish_novel(cwd)
+    lock_and_run_stage0(cwd, stage1_reply=one_new_character("Kael"))  # refs_pending, no Stage 2 yet
+    assert im("--approve-refs", client=FakeClient([])) == 0
+    assert chunk_status(1) == "refs_approved"
+    import imagesync.cli as cli_module
+    monkeypatch.setattr(cli_module, "run_stage2", lambda *a, **kw: 0)
+    assert im(client=FakeClient([])) == 1
+    err = capsys.readouterr().err
+    assert "bug" in err and "beat 0" in err
+    assert chunk_status(1) == "refs_approved"

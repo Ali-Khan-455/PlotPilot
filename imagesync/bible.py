@@ -27,6 +27,10 @@ def _need(cond, msg):
         raise ParseError(msg)
 
 
+def _strip_hash(s: str) -> str:
+    return s[1:] if s[:1] in ("#", "@") else s
+
+
 def validate_stage1(obj) -> dict:
     """Stage 1's {"new_references", "bible_update"} contract: exact keys, a bijective cross-check
     between new_references and bible_update (both directions), tag format, and _norm-uniqueness within
@@ -82,6 +86,36 @@ def check_no_collision(delta: dict, current_bible: dict) -> None:
             raise ParseError(f"tag {r['tag']!r} already exists in the Visual Bible")
 
 
+def validate_continuity(obj, current_bible: dict, beats) -> dict:
+    """The end-of-Stage-2 continuity call's {"continuity_log_entries"} contract: exact top-level key, a
+    list (possibly empty) of dicts each needing exactly {"beat","element","from","to","reason"}, all
+    five required to be non-empty strings. `element` (leading '#'/'@' stripped, _norm-compared) must
+    resolve to an existing Bible tag; `beat` (leading '#'/'@' stripped) must be one of this chunk's own
+    beats' display timecodes. Does NOT check that `element` actually appears in that specific beat's own
+    narration -- v3's own prompt text already forbids an unsupported state change, but this validator
+    doesn't independently enforce it (matches check_refs's own similarly-scoped deferral)."""
+    _need(isinstance(obj, dict) and set(obj) == {"continuity_log_entries"},
+         "Bible update output needs exactly {'continuity_log_entries'}")
+    entries = obj["continuity_log_entries"]
+    _need(isinstance(entries, list), "'continuity_log_entries' must be a list")
+    existing_tags = {_norm(row["tag"]) for category in ("characters", "locations", "objects")
+                     for row in current_bible[category]}
+    beat_timecodes = {b.timecode + b.suffix for b in beats}
+    for i, e in enumerate(entries):
+        _need(isinstance(e, dict) and set(e) == {"beat", "element", "from", "to", "reason"},
+             f"continuity_log_entries[{i}] needs exactly beat/element/from/to/reason")
+        for key in ("beat", "element", "from", "to", "reason"):
+            _need(isinstance(e[key], str) and e[key].strip(),
+                 f"continuity_log_entries[{i}].{key} must be a non-empty string")
+        e["element"] = _strip_hash(e["element"])
+        e["beat"] = _strip_hash(e["beat"])
+        _need(_norm(e["element"]) in existing_tags,
+             f"continuity_log_entries[{i}].element {e['element']!r} isn't a known Bible tag")
+        _need(e["beat"] in beat_timecodes,
+             f"continuity_log_entries[{i}].beat {e['beat']!r} isn't a beat in this chunk")
+    return obj
+
+
 def merge(bible: dict, delta: dict, chunk_idx: int, *, replace_tags: frozenset[str] = frozenset()) -> dict:
     """Deterministic merge, in `new_references` array order (slots are assigned from that order, per
     the spec's own note). A tag in `replace_tags` replaces the matching-category existing row in place,
@@ -98,9 +132,11 @@ def merge(bible: dict, delta: dict, chunk_idx: int, *, replace_tags: frozenset[s
             existing = next((row for row in b[category] if _norm(row["tag"]) == norm_tag), None)
             if existing is None:
                 raise ParseError(f"replace_tags target {r['tag']!r} not found in {category!r}")
+            # --regenerate only fixes a reference's appearance, never its story-state (the continuity
+            # log, via merge_continuity, is the sole authority for current_state) -- so a replace here
+            # never touches current_state, slot, or first_appeared_chunk.
             existing["name"] = item["name"]
             existing["descriptor"] = item["descriptor"]
-            existing["current_state"] = item["current_state"]
             continue
         all_tags = {_norm(row["tag"]) for cat in ("characters", "locations", "objects") for row in b[cat]}
         if norm_tag in all_tags:
@@ -117,6 +153,29 @@ def merge(bible: dict, delta: dict, chunk_idx: int, *, replace_tags: frozenset[s
             else:
                 new_row["slot"] = "fallback"
         b[category].append(new_row)
+    return b
+
+
+def merge_continuity(bible: dict, entries: list[dict], chunk_idx: int) -> dict:
+    """Appends one rendered continuity-log line per entry, in list order, and updates the matching
+    tag's own row's `current_state` to that entry's `to` value (last entry in the list wins per tag,
+    matching `merge`'s own append order for a fresh Stage 1 delta). Append-only: never edits or removes
+    an existing log line, and never touches `slot`/`first_appeared_chunk`/`name`/`descriptor`. Because
+    Stage 2's own message always sends the full Bible entries (which include `current_state`), this is
+    what makes a later chunk's Stage 2 call automatically see the newest continuity state with no
+    separate continuity-log data section needed."""
+    b = copy.deepcopy(bible)
+    for entry in entries:
+        tag = None
+        for category in ("characters", "locations", "objects"):
+            row = next((r for r in b[category] if _norm(r["tag"]) == _norm(entry["element"])), None)
+            if row is not None:
+                tag = row["tag"]
+                row["current_state"] = entry["to"]
+                break
+        line = (f"[chunk {chunk_idx} | beat {entry['beat']}] #{tag or entry['element']} "
+               f"{entry['from']} → {entry['to']} {entry['reason']}")
+        b["continuity_log"].append(line)
     return b
 
 

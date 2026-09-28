@@ -11,7 +11,10 @@ from pathlib import Path
 import anthropic
 
 from imagesync import config, db
-from imagesync.pipeline import approve_refs, run_regenerate, run_revise, run_stage0, run_stage1, _seconds, _stamp
+from imagesync.pipeline import (accept_bible, approve_refs, current_beats, run_bible_update, run_regenerate,
+                                run_revise, run_stage0, run_stage1, run_stage2, _batch_progress,
+                                _current_bible, _seconds, _stage2_done, _stamp, _write_all_batch_files,
+                                _write_continuity_pending_if_missing, _rewrite_manifest)
 from imagesync.source import SourceError, load_novel, open_plotpilot
 from imagesync.spec import load_spec
 from plotpilot import config as pp_config
@@ -107,9 +110,13 @@ def main(argv=None, client=None) -> int:
                     help="Re-run Stage 1 scoped to one reference, e.g. '#Kael: eye color was wrong'.")
     ap.add_argument("--approve-refs", action="store_true",
                     help="Merge the current chunk's pending references into the Visual Bible.")
+    ap.add_argument("--bible-model", default=pp_config.QC_MODEL,
+                    help="Model for the end-of-Stage-2 continuity call.")
+    ap.add_argument("--accept-bible", action="store_true",
+                    help="Merge the current chunk's pending continuity update into the Visual Bible.")
     args = ap.parse_args(argv)
-    if sum(bool(x) for x in (args.approve_refs, args.regenerate, args.revise_beat)) > 1:
-        return fail("--approve-refs, --regenerate and --revise-beat can't be combined.")
+    if sum(bool(x) for x in (args.approve_refs, args.regenerate, args.revise_beat, args.accept_bible)) > 1:
+        return fail("--approve-refs, --regenerate, --revise-beat and --accept-bible can't be combined.")
     if not args.novel.is_file():
         return fail(f"Cannot read '{args.novel}': not a regular file.")
     slug = slug_for(args.novel)
@@ -141,6 +148,8 @@ def main(argv=None, client=None) -> int:
                 print("Note: --regenerate ignored; the style isn't locked yet.")
             elif args.approve_refs:
                 print("Note: --approve-refs ignored; the style isn't locked yet.")
+            elif args.accept_bible:
+                print("Note: --accept-bible ignored; the style isn't locked yet.")
             return code
         if args.revise_beat and not args.revise_beat[1].strip():
             return fail("--revise-beat needs a non-empty description.")
@@ -154,13 +163,17 @@ def main(argv=None, client=None) -> int:
         try:
             if args.approve_refs:
                 return approve_refs(conn, novel_id, row, spec=spec, slug=slug, title=src.title)
+            if args.accept_bible:
+                return accept_bible(conn, novel_id, row, chunk, spec=spec, slug=slug, title=src.title)
             if args.regenerate:
                 return run_regenerate(conn, llm, spec, src, novel_id, row, chunk, args.regenerate,
                                       stage1_model=args.stage1_model, slug=slug)
             if args.revise_beat:
                 return run_revise(conn, llm, spec, src, novel_id, row, chunk, *args.revise_beat,
                                   gen_model=args.gen_model, slug=slug)
-            while True:
+            OUTER_LOOP_CAP = 64   # generous fixed backstop; a real run needs at most a handful of
+                                  # status transitions plus one iteration per Stage 2 batch
+            for _ in range(OUTER_LOOP_CAP):
                 if row["status"] == "ready":
                     code = run_stage0(conn, llm, spec, src, novel_id, row, chunk, gen_model=args.gen_model,
                                       slug=slug)
@@ -169,12 +182,42 @@ def main(argv=None, client=None) -> int:
                     row = db.chunks(conn, novel_id)[chunk.idx - 1]
                     continue
                 if row["status"] in ("beats", "refs_pending"):
-                    return run_stage1(conn, llm, spec, src, novel_id, row, chunk, stage1_model=args.stage1_model,
-                                      slug=slug)
+                    code = run_stage1(conn, llm, spec, src, novel_id, row, chunk,
+                                      stage1_model=args.stage1_model, slug=slug)
+                    if code != 0:
+                        return code
+                    row = db.chunks(conn, novel_id)[chunk.idx - 1]
+                    if row["status"] == "refs_pending":
+                        return 0   # the gate; run_stage1 already printed it
+                    continue        # refs_approved (no new refs), no gate -- keep going
                 if row["status"] == "refs_approved":
-                    print("Stage 2 is not built yet (IS-4).")
+                    beats = current_beats(conn, row, chunk)
+                    if not _stage2_done(conn, row["id"], beats):
+                        before, _, _ = _batch_progress(conn, row["id"])
+                        code = run_stage2(conn, llm, spec, src, novel_id, row, chunk, gen_model=args.gen_model,
+                                          slug=slug)
+                        if code != 0:
+                            return code
+                        after, _, _ = _batch_progress(conn, row["id"])
+                        if after == before:
+                            return fail(f"Chunk {chunk.idx}'s Stage 2 made no progress on batch starting at "
+                                       f"beat {before}; this is a bug (run_stage2 returned success without "
+                                       "storing a pass), not an operator-fixable state. Inspect the database.")
+                        row = db.chunks(conn, novel_id)[chunk.idx - 1]
+                        continue
+                    return run_bible_update(conn, llm, spec, src, novel_id, row, chunk,
+                                            bible_model=args.bible_model, slug=slug)
+                if row["status"] == "bible_pending":
+                    _write_all_batch_files(conn, spec, _current_bible(conn, novel_id), row, chunk, slug)
+                    bound = _write_continuity_pending_if_missing(conn, row, slug)
+                    _rewrite_manifest(conn, novel_id, src, slug)
+                    print(f"Chunk {chunk.idx}'s batches and continuity update are ready; review {bound}, "
+                         "then run --accept-bible to finish it.")
                     return 0
                 return fail(f"Chunk {chunk.idx} is in an unexpected status {row['status']!r}.")
+            return fail(f"Chunk {chunk.idx}'s continuation loop exceeded {OUTER_LOOP_CAP} iterations "
+                       "without reaching a gate or `done`; re-run, or inspect the database for a status "
+                       "that never advances.")
         except (LLMError, anthropic.AnthropicError) as e:
             log_error(config.LOG_DIR, f"{type(e).__name__}: {e}")
             print(f"ERROR: {e}", file=sys.stderr)

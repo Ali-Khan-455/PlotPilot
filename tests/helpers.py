@@ -95,3 +95,21 @@ def one_new_character(tag="Kael", descriptor="a descriptor"):
     """A scripted Stage 1 reply proposing exactly one new character reference."""
     return refs_reply([{"type": "character", "tag": tag, "descriptor": descriptor}],
                       characters=[{"name": tag, "tag": tag, "descriptor": descriptor}])
+
+
+def stage2_reply(scenes, shot_type=None, refs_used=(), genre_override=None):
+    """A scripted valid Stage 2 batch reply: one prompt per (timecode, description) in `scenes` (no
+    split suffixes), matching beats_reply's own one-beat-per-scene shape. `shot_type`, when given, is
+    used for every beat; otherwise beats cycle through wide/medium/close-up so a multi-beat batch never
+    trips the same-shot-run or missing-wide-shot cadence checks by accident."""
+    types = ["wide", "medium", "close-up"]
+    prompts = [{"timecode": tc, "scene": f"scene at {tc}",
+               "shot_type": shot_type if shot_type is not None else types[i % 3],
+               "refs_used": list(refs_used), "genre_override": genre_override}
+              for i, (tc, _) in enumerate(scenes)]
+    return json.dumps({"prompts": prompts})
+
+
+def continuity_reply(entries=()):
+    """A scripted valid end-of-Stage-2 continuity reply: {"continuity_log_entries": [...]}."""
+    return json.dumps({"continuity_log_entries": list(entries)})

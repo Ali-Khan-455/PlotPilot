@@ -6,10 +6,12 @@ JSON, and every later read (`current_beats`) comes from that JSON, never from re
 would otherwise mean re-running validation against freshly recomputed continuity context, and a stored
 revision would have no way to recover which duplicate-timecode occurrence it targeted."""
 
+import csv
 import json
 import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anthropic
@@ -18,6 +20,8 @@ from imagesync import bible, config, db
 from imagesync.beats import (REVISE_RE, Beat, ParseError, cadence_warnings, extract_json, fold,
                              validate_fresh_beats, validate_revision)
 from imagesync.bible import TYPE_TO_CATEGORY, _norm
+from imagesync.compose import (build_manifest_rows, check_refs, check_shot_cadence, check_wide_under_9_16,
+                               compose_prompt, validate_stage2)
 from plotpilot import config as pp_config
 from plotpilot.ingest import estimate_tokens
 from plotpilot.llm import LLMError, log_error
@@ -123,9 +127,15 @@ def _check_context(llm, gen_model, user, *, max_tokens, chunk_idx, stage_label="
 
 
 def attempt(llm, conn, novel_id, chunk_id, kind, model, user, parse, *, max_tokens, slug, chunk_idx,
-           note=None, note_from=None, status_for=None):
+           note=None, note_from=None, status_for=None, post_validate=None):
     """Call, parse, insert the pass once with its verdict. Retry once on ParseError; store STOPPED:<reason>
-    on a non-end_turn stop and re-raise; raise ParseError("malformed twice ...") on a second failure."""
+    on a non-end_turn stop and re-raise; raise ParseError("malformed twice ...") on a second failure.
+
+    post_validate(parsed), when given, is called only after a shape-valid parse; a non-None return becomes
+    the pass's stored verdict instead of always None. This never changes what attempt() returns — still
+    just parsed — so a caller that needs to know whether post_validate fired must recompute the same
+    condition itself from the returned value, not re-fetch the verdict from the database (db.latest_pass
+    filters verdict IS NULL and wouldn't even see a pass whose post_validate fired)."""
     last = None
     for _ in range(2):
         try:
@@ -142,6 +152,7 @@ def attempt(llm, conn, novel_id, chunk_id, kind, model, user, parse, *, max_toke
             last = e
             continue
         db.add_pass(conn, novel_id, chunk_id, kind, model, user, text,
+                    verdict=post_validate(parsed) if post_validate else None,
                     note=note_from(parsed) if note_from else note,
                     new_status=status_for(parsed) if status_for else None)
         return parsed
@@ -480,6 +491,9 @@ def run_regenerate(conn, llm, spec, src, novel_id, chunk_row, chunk, tag_reason:
         return _fail("--regenerate needs a non-empty reason.")
     if chunk_row["status"] not in ("refs_pending", "refs_approved"):
         return _fail(f"--regenerate: chunk {chunk_row['idx']} isn't at refs_pending or refs_approved.")
+    if db.ok_passes(conn, chunk_row["id"], ["stage2"]):
+        return _fail(f"--regenerate: chunk {chunk_row['idx']} already has Stage 2 batches stored; "
+                    "use the IS-5 revision path instead.")
     current = _current_bible(conn, novel_id)
     old_delta, old_replace_tags = _pending_state(conn, chunk_row["id"])
     resolved = _resolve_regenerate_target(m["tag"], current, old_delta)
@@ -519,4 +533,268 @@ def run_regenerate(conn, llm, spec, src, novel_id, chunk_row, chunk, tag_reason:
     new_pass_row = db.latest_pass(conn, chunk_row["id"], "refs")
     _write_pending(conn, slug, chunk.idx, new_pass_row["id"], new_delta)
     print(f"Reference '#{target_tag}' regenerating; review and re-run with --approve-refs.")
+    return 0
+
+
+# ---- Stage 2 (image prompts), the manifest, and the end-of-chunk continuity gate (IS-4) ----
+
+def _batch_progress(conn, chunk_id) -> tuple[int, int, list[str]]:
+    """(next_start, next_batch_index, previous_tail) from the latest ok stage2 pass's own note -- never
+    recomputed from config.BATCH_SIZE, so a later config edit can't reshuffle a batch already stored."""
+    p = db.latest_pass(conn, chunk_id, "stage2")
+    if p is None:
+        return 0, 1, []
+    note = json.loads(p["note"])
+    return note["start"] + note["count"], note["batch_index"] + 1, note["tail"]
+
+
+def _stage2_done(conn, chunk_id, beats) -> bool:
+    next_start, _, _ = _batch_progress(conn, chunk_id)
+    return next_start >= len(beats)
+
+
+def _stage2_continues_seed(conn, novel_id, chunk) -> tuple[str | None, list[str]]:
+    """For chunk.idx > 1, when this chunk's first beat has `continues` set: the previous chunk's last
+    stored stage2 item's shot type, as both a CONTINUES framing line and a one-item previous_tail seed
+    (which REPLACES previous_tail outright for batch 1 -- batch 1 has no "previous batch" of its own
+    within this chunk). (None, []) when not applicable."""
+    if chunk.idx == 1:
+        return None, []
+    rows = db.chunks(conn, novel_id)
+    chunk_row = rows[chunk.idx - 1]
+    beats = current_beats(conn, chunk_row, chunk)
+    if not beats or beats[0].continues is None:
+        return None, []
+    prev_row = rows[chunk.idx - 2]
+    p = db.latest_pass(conn, prev_row["id"], "stage2")
+    if p is None:
+        return None, []
+    note = json.loads(p["note"])
+    if not note["tail"]:
+        return None, []
+    shot_type = note["tail"][-1]
+    return (f"CONTINUES: previous chunk's last shot was #{beats[0].continues} ({shot_type}).", [shot_type])
+
+
+def _bible_entries_for_beats(current_bible, beats) -> str:
+    """The full Bible entries (current_state included) for every ref named across these beats' own
+    narration, matched by #Tag/name substring -- the same technique run_regenerate's own
+    name-in-narration precondition uses. Rendered via bible._entries' render()-style shape, never
+    _tag_index's slimmer form, since the model needs current_state here."""
+    narration = " ".join(b.narration for b in beats).lower()
+    lines = []
+    for category, slotted in (("characters", True), ("locations", False), ("objects", True)):
+        matched = [row for row in current_bible[category]
+                  if row["name"].lower() in narration or f"#{row['tag']}".lower() in narration]
+        if matched:
+            lines.extend(bible._entries(matched, slotted=slotted))
+    return "\n".join(lines) if lines else "(no matching references)"
+
+
+def _ok_stage2_by_batch(conn, chunk_id) -> dict:
+    """{batch_index: (note, pass_row)}, deduplicated to the latest ok stage2 pass per batch_index (guards
+    against two concurrent runs both storing a batch at the same index)."""
+    latest = {}
+    for p in db.ok_passes(conn, chunk_id, ["stage2"]):
+        note = json.loads(p["note"])
+        latest[note["batch_index"]] = (note, p)
+    return latest
+
+
+def _write_all_batch_files(conn, spec, current_bible, chunk_row, chunk, slug) -> None:
+    """Rewrites every batch file for this chunk from every ok stage2 pass -- not just the one just
+    written -- so a batch file deleted by hand, or a crash before this step on an earlier batch, both
+    self-heal on the next successful run."""
+    by_batch = _ok_stage2_by_batch(conn, chunk_row["id"])
+    out_dir = Path(config.IMAGES_DIR) / slug / f"chunk-{chunk.idx:02d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for batch_index in sorted(by_batch):
+        note, _ = by_batch[batch_index]
+        items = note["items"]
+        lines = [f"#{item['timecode']}\n{compose_prompt(spec, current_bible, chunk, item)}" for item in items]
+        (out_dir / f"batch-{batch_index}.txt").write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _continuity_pending_path(slug, chunk_idx, pass_id) -> Path:
+    return Path(config.CONTINUITY_PENDING_DIR) / f"{slug}.chunk-{chunk_idx:02d}.delta-{pass_id}.pending.json"
+
+
+def _write_continuity_pending_if_missing(conn, chunk_row, slug) -> Path:
+    p = db.latest_pass(conn, chunk_row["id"], "continuity")
+    bound = _continuity_pending_path(slug, chunk_row["idx"], p["id"])
+    if not bound.exists():
+        bound.parent.mkdir(parents=True, exist_ok=True)
+        delta = json.loads(p["note"])["delta"]
+        bound.write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return bound
+
+
+def _rewrite_manifest(conn, novel_id, src, slug) -> None:
+    """manifest.csv for the WHOLE novel, in chunk order, one row per stored batch -- always from the
+    stored beats' own display timecodes, never the model's own timecode field."""
+    all_rows = []
+    for chunk_row, chunk in zip(db.chunks(conn, novel_id), src.chunks):
+        beats = current_beats(conn, chunk_row, chunk)
+        if beats is None:
+            continue
+        by_batch = _ok_stage2_by_batch(conn, chunk_row["id"])
+        for batch_index in sorted(by_batch):
+            note, _ = by_batch[batch_index]
+            items = note["items"]
+            batch_beats = beats[note["start"]:note["start"] + note["count"]]
+            entries = [(b.timecode + b.suffix, item) for b, item in zip(batch_beats, items)]
+            all_rows.extend(build_manifest_rows(entries))
+    path = Path(config.IMAGES_DIR) / slug / "manifest.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["timecode", "shot_type", "first_5_words"])
+        w.writerows(all_rows)
+
+
+def run_stage2(conn, llm, spec, src, novel_id, chunk_row, chunk, *, gen_model, slug) -> int:
+    current = _current_bible(conn, novel_id)
+    beats = current_beats(conn, chunk_row, chunk)
+    start, batch_index, previous_tail = _batch_progress(conn, chunk_row["id"])
+    if start >= len(beats):
+        return 0
+    batch = beats[start:start + config.BATCH_SIZE]
+    aspect = current["style_lock"]["aspect"]
+
+    continues_text, previous_beats_text = None, None
+    if start == 0:
+        continues_text, seed_tail = _stage2_continues_seed(conn, novel_id, chunk)
+        previous_tail = seed_tail or previous_tail
+    else:
+        prev_slice = beats[max(0, start - 3):start]
+        previous_beats_text = spec.stage2_context_label + "\n" + _beats_block(prev_slice)
+
+    stage2_prompt = "\n\n".join([spec.stages["STAGE 2"].text, spec.contracts.override, spec.contracts.stage2])
+    sections = [spec.mode_a_line]
+    if continues_text:
+        sections.append(continues_text)
+    if previous_beats_text:
+        sections.append(previous_beats_text)
+    sections.append(_beats_block(batch))
+    sections.append(json.dumps({"style_lock": current["style_lock"]}))
+    sections.append(_bible_entries_for_beats(current, batch))
+    user = stage2_prompt + "\n\n---\n\n" + "\n\n---\n\n".join(sections)
+    err = _check_context(llm, gen_model, user, max_tokens=config.STAGE2_MAX_TOKENS, chunk_idx=chunk.idx,
+                         stage_label="Stage 2", flag_name="--gen-model")
+    if err:
+        return _fail(err)
+
+    def _qa(items):
+        return check_refs(current, items) + check_shot_cadence(items, aspect, previous_tail=previous_tail)
+
+    def _note_from(p):
+        # `p["prompts"]` is the PARSED object -- validate_stage2 already normalized its `timecode`/
+        # `refs_used` fields in place (stripped a leading '#'/'@'). The pass's own `output_text` stores
+        # the model's raw, un-normalized reply, so every later reader (batch files, the manifest, the
+        # continuity call) must read these already-normalized items back from the note, never re-parse
+        # output_text -- otherwise a `#`/`@`-prefixed value that validate_stage2 tolerated crashes or
+        # corrupts output the moment a stored pass is read back instead of used fresh.
+        return json.dumps({"start": start, "count": len(batch), "batch_index": batch_index,
+                          "tail": [i["shot_type"] for i in p["prompts"][-8:]], "items": p["prompts"]})
+
+    try:
+        parsed = attempt(
+            llm, conn, novel_id, chunk_row["id"], "stage2", gen_model, user,
+            lambda t: validate_stage2(extract_json(t), batch),
+            max_tokens=config.STAGE2_MAX_TOKENS, slug=slug, chunk_idx=chunk.idx,
+            post_validate=lambda p: "QA_RETRIED" if _qa(p["prompts"]) else None, note_from=_note_from)
+    except ParseError as e:
+        return _fail(f"Chunk {chunk.idx}'s batch {batch_index} output was {e}; raw outputs are stored. "
+                    "Re-run to try again.")
+
+    problems = _qa(parsed["prompts"])
+    if problems:
+        retry_user = user + "\n\n---\n\nYour previous batch had these problems:\n" + "\n".join(problems)
+        try:
+            parsed2 = attempt(
+                llm, conn, novel_id, chunk_row["id"], "stage2", gen_model, retry_user,
+                lambda t: validate_stage2(extract_json(t), batch),
+                max_tokens=config.STAGE2_MAX_TOKENS, slug=slug, chunk_idx=chunk.idx,
+                post_validate=lambda p: "QA_FAILED" if check_refs(current, p["prompts"]) else None,
+                note_from=_note_from)
+        except ParseError as e:
+            return _fail(f"Chunk {chunk.idx}'s batch {batch_index} retry output was {e}; raw outputs are "
+                        "stored. Re-run to try again.")
+        ref_problems = check_refs(current, parsed2["prompts"])
+        if ref_problems:
+            return _fail(f"Chunk {chunk.idx}'s batch {batch_index} has unconfirmed reference(s): "
+                        f"{'; '.join(ref_problems)} Re-run to try this batch again.")
+        for w in check_shot_cadence(parsed2["prompts"], aspect, previous_tail=previous_tail):
+            print(f"WARNING: {w}")
+        parsed = parsed2
+
+    for w in check_wide_under_9_16(parsed["prompts"], aspect):
+        print(f"WARNING: {w}")
+    _write_all_batch_files(conn, spec, current, chunk_row, chunk, slug)
+    print(f"Batch {batch_index} stored -> {Path(config.IMAGES_DIR) / slug / f'chunk-{chunk.idx:02d}' / f'batch-{batch_index}.txt'}.")
+    return 0
+
+
+def run_bible_update(conn, llm, spec, src, novel_id, chunk_row, chunk, *, bible_model, slug) -> int:
+    current = _current_bible(conn, novel_id)
+    beats = current_beats(conn, chunk_row, chunk)
+    if not _stage2_done(conn, chunk_row["id"], beats):
+        return _fail(f"Chunk {chunk.idx}: Stage 2 isn't complete yet; run it before the continuity update.")
+
+    by_batch = _ok_stage2_by_batch(conn, chunk_row["id"])
+    prompts_lines = []
+    for batch_index in sorted(by_batch):
+        note, _ = by_batch[batch_index]
+        for item in note["items"]:
+            prompts_lines.append(f"#{item['timecode']}: {compose_prompt(spec, current, chunk, item)}")
+
+    prompt = "\n\n".join([spec.continuity_prompt, spec.contracts.override, spec.contracts.bible_update])
+    user = prompt + "\n\n---\n\n" + "\n\n---\n\n".join([_beats_block(beats), "\n".join(prompts_lines)])
+    err = _check_context(llm, bible_model, user, max_tokens=config.BIBLE_UPDATE_MAX_TOKENS, chunk_idx=chunk.idx,
+                         stage_label="Bible update", flag_name="--bible-model")
+    if err:
+        return _fail(err)
+    try:
+        attempt(llm, conn, novel_id, chunk_row["id"], "continuity", bible_model, user,
+               lambda t: bible.validate_continuity(extract_json(t), current, beats),
+               max_tokens=config.BIBLE_UPDATE_MAX_TOKENS, slug=slug, chunk_idx=chunk.idx,
+               note_from=lambda d: json.dumps({"delta": d}), status_for=lambda _: "bible_pending")
+    except ParseError as e:
+        return _fail(f"Chunk {chunk.idx}'s continuity output was {e}; raw outputs are stored. "
+                    "Re-run to try again.")
+
+    _write_all_batch_files(conn, spec, current, chunk_row, chunk, slug)
+    bound = _write_continuity_pending_if_missing(conn, chunk_row, slug)
+    _rewrite_manifest(conn, novel_id, src, slug)
+    print(f"Chunk {chunk.idx}'s batches and continuity update are ready; review {bound}, "
+         "then run --accept-bible to finish it.")
+    return 0
+
+
+def accept_bible(conn, novel_id, chunk_row, chunk, *, spec, slug, title) -> int:
+    if chunk_row["status"] != "bible_pending":
+        return _fail(f"--accept-bible: chunk {chunk_row['idx']} isn't at bible_pending.")
+    pass_row = db.latest_pass(conn, chunk_row["id"], "continuity")
+    bound = _continuity_pending_path(slug, chunk_row["idx"], pass_row["id"])
+    if not bound.exists():
+        return _fail(f"Pending file {bound} not found; re-run without --accept-bible to regenerate it.")
+    current = _current_bible(conn, novel_id)
+    beats = current_beats(conn, chunk_row, chunk)
+    try:
+        obj = bible.validate_continuity(json.loads(bound.read_text(encoding="utf-8-sig")), current, beats)
+    except (ValueError, ParseError) as e:
+        return _fail(f"Pending file {bound} is invalid: {e}")
+    merged = bible.merge_continuity(current, obj["continuity_log_entries"], chunk.idx)
+    try:
+        db.add_bible_version(conn, novel_id, chunk.idx, "continuity", json.dumps(merged, ensure_ascii=False),
+                             json.dumps(obj, ensure_ascii=False), source_pass_id=pass_row["id"],
+                             chunk_id=chunk_row["id"], new_status="done")
+    except sqlite3.IntegrityError:
+        return _fail("--accept-bible: this pass was already accepted (replayed accept).")
+    bound.unlink()
+    _write_bible_file(spec, merged, slug, title)
+    Path(config.LOG_DIR).mkdir(parents=True, exist_ok=True)
+    with open(Path(config.LOG_DIR) / "bible-accepts.log", "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(timezone.utc).isoformat()} chunk {chunk.idx} accepted (pass {pass_row['id']})\n")
+    print(f"Chunk {chunk.idx}'s continuity update accepted; chunk done.")
     return 0
